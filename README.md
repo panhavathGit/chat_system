@@ -38,11 +38,15 @@ Prisma configuration is in `backend/prisma.config.ts`.
 
 ```sh
 cp backend/.env.example backend/.env
-# Set DATABASE_URL in backend/.env to your MySQL connection URL.
+# Set DATABASE_URL in backend/.env to your PostgreSQL connection URL (and `REDIS_URL`).
 pnpm db:validate
 pnpm db:generate
 pnpm db:migrate
 ```
+
+Start the API (Express 5 + `ws` at `/ws`, Redis pub/sub) with `pnpm dev:backend`;
+`GET http://localhost:4000/api/health` checks PostgreSQL and Redis. Code follows
+Routes → Controller → Service → Repository → Prisma in `backend/src/`.
 
 Run these commands from the repository root. They run Prisma in the backend
 package, which loads `backend/.env`. See [database setup](docs/database-schema.md)

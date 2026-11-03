@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "pnpm --filter @chat-dashboard/frontend dev",
     "build": "pnpm -r build",
+    "dev:backend": "pnpm --filter @chat-dashboard/backend dev",
     "preview": "pnpm --filter @chat-dashboard/frontend preview",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",

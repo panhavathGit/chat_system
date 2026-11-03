@@ -1,7 +1,7 @@
-// Mirrors backend/prisma/schema.prisma (MySQL 8.0.16+).
+// Mirrors backend/prisma/schema.prisma (PostgreSQL 16+).
 
 Project chat_dashboard {
-  database_type: 'MySQL'
+  database_type: 'PostgreSQL'
   Note: 'Loan-application support chat with AI to human handoff'
 }
 

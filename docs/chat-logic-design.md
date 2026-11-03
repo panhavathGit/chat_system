@@ -13,7 +13,7 @@ AI assistant, the AI escalates, and a human agent takes over.
 ## 2. Architecture
 
 ```
-WebSocket gateway --> event handlers --> services (chat, handoff, ai) --> Prisma (MySQL)
+WebSocket gateway --> event handlers --> services (chat, handoff, ai) --> Prisma (PostgreSQL)
         ^                                        |
         '---- Redis pub/sub (fan-out) <----------'          AI worker (queue job)
 ```
@@ -168,7 +168,7 @@ The current protocol cannot express several cases. Add:
 | `message.ack` reuses `clientId` as the id | Real uuid plus `clientId` mapping |
 | `conversation.read` clears unread for everyone | Per-user read state; shared badge cleared by the owner |
 | No errors, no conflict check on takeover | Conditional update and error events |
-| Nothing persisted | MySQL via Prisma |
+| Nothing persisted | PostgreSQL via Prisma |
 
 ## 9. Build order
 
