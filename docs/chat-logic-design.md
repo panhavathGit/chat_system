@@ -10,12 +10,20 @@ and the step-by-step logic of each event. It builds on the data model in
 The product is a loan-support chat with an AI-to-human handoff: customers talk to an
 AI assistant, the AI escalates, and a human agent takes over.
 
+The system is two independent backends plus web and mobile clients. **Backend 1 (main)** owns identity,
+authentication, users, agents, customers, loan applications and permissions. **Backend 2 (chat, this repo)** owns
+conversations, messages, receipts, assignments, realtime and AI handoff. Clients log in through Backend 1, then use
+the same access token against Backend 2. Backend 2 never issues tokens or stores credentials; it verifies them and
+asks Backend 1 for identity, permissions and customer/loan context. The Backend 1 API contract (token format,
+verify endpoint, claims, id format) is **not yet known and is not designed here**.
+
 ## 2. Architecture
 
 ```
-WebSocket gateway --> event handlers --> services (chat, handoff, ai) --> Prisma (PostgreSQL)
-        ^                                        |
-        '---- Redis pub/sub (fan-out) <----------'          AI worker (queue job)
+WebSocket gateway --> event handlers --> services (chat, handoff, ai) --> Prisma (chat PostgreSQL)
+        ^                                        |   \
+        '---- Redis pub/sub (fan-out) <----------'    '--> Backend 1 client (identity, permissions, customer/loan)
+                                                    AI worker (queue job)   Push service (FCM / APNs)
 ```
 
 - **Gateway:** authenticates the socket and routes events. It holds no business rules.
@@ -27,16 +35,18 @@ WebSocket gateway --> event handlers --> services (chat, handoff, ai) --> Prisma
 
 ## 3. Connection, authentication and sync
 
-1. The client connects with an access token. The server validates it against the
-   `sessions` table (token hash found, not revoked, not expired) and loads the user.
+1. The client connects with the access token issued by Backend 1. The server verifies it through Backend 1
+   (mechanism TBD: local verification or introspection) and takes the user id and role from the result.
+   There is no `sessions` table in this database.
 2. Only users with role `AGENT`, `SUPERVISOR` or `ADMIN` can open the dashboard socket.
-   Customers use a separate channel.
+   Customers use a separate channel. Roles come from Backend 1.
 3. On `sync.request` the server sends:
    - the inbox (see visibility rules below),
    - the last N messages per conversation (not the full history),
    - agents and unread notifications.
 4. On reconnect the client sends `sync.request` again and merges by id. Missed events are
-   not replayed.
+   not replayed; the client fetches messages after its last cursor (`created_at` / `id`), which is also how a
+   mobile app catches up after a push notification.
 
 **Visibility rule.** An agent sees a conversation if it is in the shared queue
 (`NEEDS_HUMAN`), assigned to them, or they are a `VIEWER` on it. Other agents' chats are
@@ -60,6 +70,7 @@ AI --(escalate / callback / customer asks)--> NEEDS_HUMAN --(takeover)--> ASSIGN
 ## 5. Core flows
 
 ### 5.1 Customer sends a message
+
 1. In one transaction:
    - insert the message (`sender_type = CUSTOMER`);
    - update the conversation: `preview`, `last_message_at`, `unread_count + 1`;
@@ -70,7 +81,14 @@ AI --(escalate / callback / customer asks)--> NEEDS_HUMAN --(takeover)--> ASSIGN
    - `NEEDS_HUMAN`: nothing more; the conversation waits in the queue.
    - `ASSIGNED`: notify only the owner.
 
+Before building any DTO that needs customer or loan data, the service fetches it from Backend 1 by
+`customer_id` / `application_id` (agent opens a conversation: flow G). That data is not stored here.
+
+When a conversation is created for a customer and loan application, Backend 2 first verifies the customer and
+application with Backend 1, then finds the existing active conversation for that application or creates one.
+
 ### 5.2 AI reply and escalation (queue job)
+
 1. Re-read the conversation. If `handoff` is no longer `AI` (an agent took over in the
    meantime), drop the job.
 2. Generate the reply and insert `ASSISTANT` messages (no sender).
@@ -80,6 +98,7 @@ AI --(escalate / callback / customer asks)--> NEEDS_HUMAN --(takeover)--> ASSIGN
    - create `HANDOFF` notifications for available agents.
 
 ### 5.3 Agent sends a message (`message.send`)
+
 1. Permission: the sender must be the active owner of the conversation. Otherwise reply
    with `message.error`.
 2. Insert the message. The unique key `(conversation_id, client_id)` makes this idempotent:
@@ -87,9 +106,13 @@ AI --(escalate / callback / customer asks)--> NEEDS_HUMAN --(takeover)--> ASSIGN
 3. Update the conversation preview and time, and reset `unread_count`.
 4. Reply `message.ack` carrying both `clientId` and the real message `id`.
 5. Deliver through the customer's channel, then emit `message.status`:
-   `sent` -> `delivered` -> `read`, or `failed` on error.
+   `sent` -> `delivered` -> `read`, or `failed` on error. Each recipient's delivery and read
+   acknowledgement is saved in `message_receipts` before the status is relayed to the sender.
+6. If the recipient has no live socket and their settings allow it, send a push notification
+   (FCM / APNs) to their non-revoked `device_tokens`. Mark a token `revoked_at` when the provider rejects it.
 
 ### 5.4 Takeover (`conversation.takeover`)
+
 Must be safe against two agents clicking at once. The conditional update decides the winner:
 
 ```ts
@@ -118,7 +141,9 @@ this up: a CHECK keeps `handoff` and `assigned_agent_id` consistent, and a uniqu
 prevents two active owners.
 
 ### 5.5 Release, reassign, resolve
+
 These events are not in the protocol yet and need to be added.
+
 - **Release:** set `handoff = AI` (or `NEEDS_HUMAN`) and `assigned_agent_id = NULL` in a
   single statement, and close the owner row (`unassigned_at`).
 - **Reassign (supervisor only):** same as takeover, with the target agent chosen by the
@@ -127,11 +152,14 @@ These events are not in the protocol yet and need to be added.
   A scheduled job moves idle `RESOLVED` conversations to `CLOSED` after N days.
 
 ### 5.6 Read and unread (`conversation.read`)
+
 Upsert `conversation_reads(user, conversation, now)`. Reset the shared `unread_count` only
 when the owner reads the conversation.
 
 ### 5.7 Other events
-- **Typing:** relayed in memory or Redis; no database writes.
+
+- **Typing:** a short-lived Redis key with a TTL plus a pub/sub event, so every server instance relays it;
+  no database writes.
 - **`callback.request`:** create a `CALLBACK` notification for the owner (or the queue if
   unassigned) and an `activities` entry.
 - **Internal notes:** messages with `type = NOTE` are never delivered to the customer;
@@ -139,43 +167,48 @@ when the owner reads the conversation.
 
 ## 6. Permission matrix
 
-| Action | AI-handled | Waiting for human | Assigned to me | Assigned to someone else |
-|---|---|---|---|---|
-| View | agent: yes | yes | yes | read-only (supervisor: yes) |
-| Send message | no | no | yes | no |
-| Takeover | supervisor only | yes | n/a | supervisor (reassign) |
-| Resolve | supervisor | no | yes | supervisor |
+| Action       | AI-handled      | Waiting for human | Assigned to me | Assigned to someone else    |
+| ------------ | --------------- | ----------------- | -------------- | --------------------------- |
+| View         | agent: yes      | yes               | yes            | read-only (supervisor: yes) |
+| Send message | no              | no                | yes            | no                          |
+| Takeover     | supervisor only | yes               | n/a            | supervisor (reassign)       |
+| Resolve      | supervisor      | no                | yes            | supervisor                  |
 
 Enforce these in the service layer, not only in the UI.
 
 ## 7. Protocol additions needed
 
 The current protocol cannot express several cases. Add:
+
 - `error` / `message.error` events with a code (`ALREADY_TAKEN`, `NOT_OWNER`, `NOT_FOUND`).
 - `conversation.release`, `conversation.resolve`, `conversation.reassign`.
 - `messages.history` (cursor pagination by `created_at` / `id`).
 - `message.ack` must return `{ clientId, message }` so the client can map its optimistic id
   to the server id.
+- The PDF names events `message:send`, `message:new`, `message:sent`, `message:delivered`, `message:read`,
+  `typing:start`, `typing:stop`, `conversation:assigned`; the protocol uses dotted names (`message.ack`, ...).
+  Pick one naming scheme and change protocol, gateway, frontend and mock together.
+- REST paths in the PDF are under `/api/v1`; the backend mounts under `/api`. Decide before building endpoints.
 - The DTO `id` is currently the conversation slug (e.g. `maya`); the server maps slug to
   the uuid primary key.
 
 ## 8. Differences from the current mock server
 
-| Mock behaviour | Real backend |
-|---|---|
-| Broadcasts every event to every socket | Per-socket visibility rules |
-| No authentication; agent hardcoded | Session-based auth; real agent from the token |
-| `message.ack` reuses `clientId` as the id | Real uuid plus `clientId` mapping |
-| `conversation.read` clears unread for everyone | Per-user read state; shared badge cleared by the owner |
-| No errors, no conflict check on takeover | Conditional update and error events |
-| Nothing persisted | PostgreSQL via Prisma |
+| Mock behaviour                                 | Real backend                                                   |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| Broadcasts every event to every socket         | Per-socket visibility rules                                    |
+| No authentication; agent hardcoded             | Backend 1 token verified on connect; real agent from the token |
+| `message.ack` reuses `clientId` as the id      | Real uuid plus `clientId` mapping                              |
+| `conversation.read` clears unread for everyone | Per-user read state; shared badge cleared by the owner         |
+| No errors, no conflict check on takeover       | Conditional update and error events                            |
+| Nothing persisted                              | PostgreSQL via Prisma                                          |
 
 ## 9. Build order
 
-1. Backend skeleton, auth handshake (sessions) and `sync`.
+1. Backend skeleton, Backend 1 client and auth handshake (once its contract is known), and `sync`.
 2. Customer and agent message flows with the idempotent ack.
 3. Takeover with conflict handling, then release and resolve.
 4. Fan-out with visibility rules, then Redis for multiple instances.
 5. AI worker and escalation.
-6. History paging, notifications and dashboard metrics (AI-handled share, time to assign,
+6. History paging, notifications, push (device tokens) and dashboard metrics (AI-handled share, time to assign,
    first response time, resolution time).
