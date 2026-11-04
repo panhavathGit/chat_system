@@ -9,20 +9,20 @@ Loan-support chat dashboard: customers talk to an AI assistant, which escalates 
 pnpm monorepo (`pnpm-workspace.yaml`): `frontend/`, `backend/`, `packages/` (currently empty).
 Node 22, pnpm 10 (pinned in `.mise.toml` and root `package.json`).
 
-| Area | Stack |
-| --- | --- |
-| `frontend/` | React 19, TypeScript, Vite, Zustand 5, Tailwind 4, Vitest, oxlint, Prettier |
-| `backend/` | Node 22, Express 5, TypeScript (ESM, `NodeNext`), Prisma 7 (`pg` adapter), PostgreSQL 16+, `ws`, Redis (`ioredis`), zod |
+| Area        | Stack                                                                                                                   |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `frontend/` | React 19, TypeScript, Vite, Zustand 5, Tailwind 4, Vitest, oxlint, Prettier                                             |
+| `backend/`  | Node 22, Express 5, TypeScript (ESM, `NodeNext`), Prisma 7 (`pg` adapter), PostgreSQL 16+, `ws`, Redis (`ioredis`), zod |
 
 ## Commands (run from repo root)
 
-| Command | Purpose |
-| --- | --- |
-| `pnpm dev` / `pnpm dev:backend` | Frontend dev server / backend API (`tsx watch`) |
-| `pnpm check` | typecheck + lint + FSD check + format check + tests (what CI runs) |
-| `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm format` | Individual checks (all workspaces) |
-| `pnpm check:fsd` | Frontend layer-boundary check |
-| `pnpm db:validate` / `db:generate` / `db:migrate` | Prisma (runs in `backend/`, reads `backend/.env`) |
+| Command                                                   | Purpose                                                            |
+| --------------------------------------------------------- | ------------------------------------------------------------------ |
+| `pnpm dev` / `pnpm dev:backend`                           | Frontend dev server / backend API (`tsx watch`)                    |
+| `pnpm check`                                              | typecheck + lint + FSD check + format check + tests (what CI runs) |
+| `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm format` | Individual checks (all workspaces)                                 |
+| `pnpm check:fsd`                                          | Frontend layer-boundary check                                      |
+| `pnpm db:validate` / `db:generate` / `db:migrate`         | Prisma (runs in `backend/`, reads `backend/.env`)                  |
 
 ## Source of truth (read these, do not restate them)
 
@@ -35,12 +35,15 @@ Node 22, pnpm 10 (pinned in `.mise.toml` and root `package.json`).
 
 - **Frontend:** Feature-Sliced Design, `app → pages → widgets → features → entities → shared`, `@/` = `src/`.
   Slices expose only `index.ts`; features never import features. Enforced by `pnpm check:fsd`.
-- **Backend:** `Routes → Controller → Service → Repository → Prisma → PostgreSQL` in `backend/src/`
-  (`routes/`, `controllers/`, `services/`, `repositories/`, `middleware/`, `ws/`, `config/`, `lib/`).
+- **Backend:** modular, one folder per domain under `backend/src/modules/<name>/`, each holding
+  `<name>.routes.ts → .controller.ts → .service.ts → .repository.ts` (+ `.schema.ts` for zod, `.types.ts`, optional `.openapi.ts`) and then
+  Prisma → PostgreSQL. Cross-cutting code lives in `config/`, `database/`, `websocket/`, `shared/`
+  (`errors/`, `middleware/`, `validators/`, `utils/`, `constants/`, `types/`; create a folder when first needed).
+  `src/routes.ts` mounts module routers under `/api`. See [docs/backend-structure.md](docs/backend-structure.md).
   Only repositories query Prisma (the one exception is `server.ts` calling `prisma.$disconnect()` on shutdown). Services own business rules and transactions. Controllers only
-  parse/validate input and shape the response. WebSocket handlers play the controller role:
-  `ws handler → service → repository`.
-- **Realtime:** `backend/src/ws/gateway.ts` serves `/ws` and fans events out through Redis channel `chat:events`.
+  validate input (via the `validate()` middleware) and shape the response. WebSocket handlers play the controller role:
+  `ws handler → service → repository`. Modules call each other only through services, never repositories.
+- **Realtime:** `backend/src/websocket/websocket.server.ts` serves `/ws` and fans events out through Redis channel `chat:events`.
   Frontend uses a built-in mock server unless `VITE_WS_URL` is set.
 
 ## Current state (keep docs honest)
@@ -50,8 +53,9 @@ Node 22, pnpm 10 (pinned in `.mise.toml` and root `package.json`).
 - **Authentication is an external service** (separate repo). This backend only consumes it: it must not issue tokens,
   store passwords, or implement login. The service's API contract (token format, verify/introspect endpoint, user/role
   claims) is **not yet known**; do not invent it. See `authentication-security`.
-- The backend has no test, lint or format scripts, so `pnpm check` only typechecks it. Until they exist, also run
-  `pnpm --filter @chat-dashboard/backend build` and `npx prettier --check backend/src`. No backend tests exist yet. `packages/` is empty, so the backend cannot import frontend types;
+- The backend has Vitest (`pnpm test` runs it, with 70/70/70/65 coverage thresholds via `test:coverage`) but no lint or
+  format scripts, so also run `pnpm --filter @chat-dashboard/backend build` and `npx prettier --check backend/src`.
+  Only the health module and shared middleware have tests so far. `packages/` is empty, so the backend cannot import frontend types;
   the protocol is currently defined only in the frontend.
 
 ## Rules
@@ -72,13 +76,13 @@ Node 22, pnpm 10 (pinned in `.mise.toml` and root `package.json`).
 
 Load the skills that match the task (a feature usually needs several):
 
-| Skill | Use for |
-| --- | --- |
-| `frontend-development` | anything in `frontend/` |
-| `backend-development` | services, repositories, config in `backend/src/` |
-| `api-development` | REST endpoints under `/api` |
-| `websocket-development` | new/changed realtime events (spans protocol, gateway, frontend, mock) |
-| `database-design` | schema, migrations, constraints |
-| `authentication-security` | auth, sessions, permissions, secrets |
-| `testing` | writing tests, verifying work |
-| `code-review` | reviewing a diff before finishing |
+| Skill                     | Use for                                                               |
+| ------------------------- | --------------------------------------------------------------------- |
+| `frontend-development`    | anything in `frontend/`                                               |
+| `backend-development`     | services, repositories, config in `backend/src/`                      |
+| `api-development`         | REST endpoints under `/api`                                           |
+| `websocket-development`   | new/changed realtime events (spans protocol, gateway, frontend, mock) |
+| `database-design`         | schema, migrations, constraints                                       |
+| `authentication-security` | auth, sessions, permissions, secrets                                  |
+| `testing`                 | writing tests, verifying work                                         |
+| `code-review`             | reviewing a diff before finishing                                     |

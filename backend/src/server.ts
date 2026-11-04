@@ -1,15 +1,16 @@
 import { createServer } from "node:http";
-import { prisma } from "../prisma/client.js";
 import { app } from "./app.js";
-import { env } from "./config/env.js";
-import { redis } from "./lib/redis.js";
-import { attachWebSocketGateway } from "./ws/gateway.js";
+import { prisma } from "@config/database.js";
+import { env } from "@config/env.js";
+import { logger } from "@config/logger.js";
+import { redis } from "@config/redis.js";
+import { attachWebSocketServer } from "./websocket/websocket.server.js";
 
 const server = createServer(app);
-const wss = attachWebSocketGateway(server);
+const wss = attachWebSocketServer(server);
 
 server.listen(env.PORT, () => {
-  console.log(`API listening on http://localhost:${env.PORT} (ws at /ws)`);
+  logger.info({ port: env.PORT }, "API listening (ws at /ws)");
 });
 
 async function shutdown() {

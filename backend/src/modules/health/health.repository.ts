@@ -1,11 +1,12 @@
-import { prisma } from "../../prisma/client.js";
-import { redis } from "../lib/redis.js";
+import { prisma } from "@config/database.js";
+import { redis } from "@config/redis.js";
 
-export const healthRepository = {
+export class HealthRepository {
   async pingDatabase(): Promise<void> {
     await prisma.$queryRaw`SELECT 1`;
-  },
+  }
+
   async pingRedis(): Promise<void> {
     await redis.ping();
-  },
-};
+  }
+}

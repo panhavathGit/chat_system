@@ -14,7 +14,7 @@ Related files:
 | `backend/prisma/schema.prisma` | Source of truth for tables, columns, relations, enums |
 | `backend/prisma/sql/constraints.sql` | Constraints Prisma cannot express; append to the first migration |
 | `backend/prisma.config.ts` | Prisma 7 config (schema path, `DATABASE_URL`) |
-| `backend/prisma/client.ts` | `PrismaClient` with the `pg` driver adapter |
+| `backend/src/config/database.ts` | `PrismaClient` with the `pg` driver adapter |
 | `docs/database-schema.dbml` | Same schema for https://dbdiagram.io/d |
 
 Tables are snake_case plural (`users`, `agent_conversations`); in code use the

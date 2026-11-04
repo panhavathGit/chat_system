@@ -1,12 +1,12 @@
 import type { Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import { createRedis } from "../lib/redis.js";
+import { createRedis } from "@config/redis.js";
 
 // Every API instance publishes chat events to this channel and relays what it
 // receives to its own sockets, so the gateway scales past one process.
 export const EVENTS_CHANNEL = "chat:events";
 
-export function attachWebSocketGateway(server: Server) {
+export function attachWebSocketServer(server: Server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
   const subscriber = createRedis();
 

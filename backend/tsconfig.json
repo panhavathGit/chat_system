@@ -12,7 +12,13 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@config/*": ["./src/config/*"],
+      "@modules/*": ["./src/modules/*"],
+      "@shared/*": ["./src/shared/*"],
+      "@lib/*": ["./src/lib/*"]
+    }
   },
-  "include": ["src", "prisma/client.ts", "prisma.config.ts"]
+  "include": ["src", "prisma.config.ts", "vitest.config.ts"]
 }

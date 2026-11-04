@@ -25,3 +25,5 @@ logs/
 /backend/prisma/generated/
 
 !backend/.env.example
+
+coverage/
