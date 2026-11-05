@@ -2,267 +2,234 @@
 
 ## Overview
 
-This document describes the persistent data model backing the Chat Dashboard
-frontend. The schema is defined in `prisma/schema.prisma` and targets
-PostgreSQL. It normalizes entities that are currently embedded or duplicated in
-the client-side TypeScript DTOs (`ConversationDto`, `ChatMessageDto`,
-`ActivityDto` in `src/shared/api/ws/protocol.ts`).
+The persistent data model of the **chat backend (Backend 2)**, targeting **PostgreSQL 16+** (Prisma 7).
+The diagram source is [database-schema.dbml](database-schema.dbml) (paste it into https://dbdiagram.io/d);
+`backend/prisma/schema.prisma` is generated from it.
 
-## Entity Relationship Diagram
+| File                                 | Purpose                                                                                            |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `docs/database-schema.dbml`          | **Source of truth** for tables, columns, indexes and relations                                     |
+| `backend/prisma/schema.prisma`       | Generated from the DBML (Backend 2 tables only); do not edit by hand                               |
+| `backend/prisma/sql/constraints.sql` | Value-set CHECKs, consistency rules, partial and expression indexes; append to the first migration |
+| `backend/prisma.config.ts`           | Prisma 7 config (schema path, `DATABASE_URL`)                                                      |
+| `backend/src/config/database.ts`     | `PrismaClient` with the `pg` driver adapter                                                        |
 
+Tables are snake_case plural (`conversations`, `message_receipts`); in code use the Prisma names
+(`prisma.conversation`, `lastMessageAt`).
+
+## Service boundary
+
+Two independent backends, each with its own PostgreSQL database:
+
+- **Backend 1 (main):** users, roles, permissions, customers, agents, loan applications and authentication.
+  Its tables appear in the DBML (group `Backend_1_External`) and are mirrored as Prisma models (`User`, `Role`,
+  `Permission`, `UserRole`, `RolePermission`, `Customer`, `Agent`, `LoanApplication`) **without `password_hash`**.
+  Backend 1 owns the data; chat tables never have a foreign key to these models.
+- **Backend 2 (chat, this repo):** everything else in the DBML.
+
+Backend 2 stores Backend 1 records as plain `BIGINT` ids with **no foreign key**. A foreign key cannot span two
+databases, so existence and permissions of those ids are checked in the service layer against Backend 1 (contract not
+yet known; see `authentication-security`). The id spaces are:
+
+| Column kind                                                                                        | Backend 1 id           |
+| -------------------------------------------------------------------------------------------------- | ---------------------- |
+| `customer_id`, `*_type = CUSTOMER` with `*_id`                                                     | `customers.id`         |
+| `agent_id`, `assigned_agent_id`, `assigned_by`, `created_by`, `*_by`, `*_type = AGENT` with `*_id` | `agents.id`            |
+| `application_id`                                                                                   | `loan_applications.id` |
+| `team_id`                                                                                          | a Backend 1 team id    |
+
+Every actor is identified by `agents.id` or `customers.id`, never `users.id`, so a given person has one id here.
+Names, avatars, roles and loan details are fetched from Backend 1, with one exception: `conversations.customer_name`
+and `customer_identifier` are snapshots kept so the inbox can be searched and sorted in SQL.
+
+## Conventions
+
+- **Ids:** every primary key is an auto-increment `BIGINT` (no UUIDs). Prisma returns `bigint`, which `JSON.stringify`
+  cannot serialize; convert ids to strings at the controller boundary.
+- **No database enums.** Fixed-value columns are `VARCHAR` strings. Allowed values are enforced by CHECK constraints
+  in `constraints.sql` (the **proposed** sets are listed below; adding a value means changing that CHECK).
+- **Polymorphic actors.** Where either a customer or an agent can act, a `*_type` column is paired with a `*_id` column.
+- **Types:** timestamps are `timestamptz`, JSON columns are `jsonb`, and `push_devices.device_token` is `VARCHAR(512)` so its unique index stays small.
+- **Foreign keys inside this database:** rows owned by a message, note, call or conversation join table cascade on
+  delete; optional references use `SET NULL`; everything else is `RESTRICT`, so audit history cannot be deleted by accident.
+  `messages.conversation_id` is `RESTRICT` too: messages are soft-deleted and a conversation holding messages cannot be deleted.
+  `reply_to_message_id` and `conversation_reads.last_read_message_id` are composite FKs with `conversation_id`, so they can
+  only point at a message in the same conversation.
+- **Denormalized fields** (`assigned_agent_id`, `last_message_at`, `last_message_preview`, `last_sequence_number`,
+  `messages.status`) are updated in the same transaction as the change that affects them.
+
+## Tables
+
+### Conversation core
+
+| Table                       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `conversations`             | One chat. `conversation_type` (`CUSTOMER_SUPPORT`/`INTERNAL`), `channel` (`web`/`mobile`), `created_by_type`/`created_by_id`, `status`, `priority`, `conversation_mode` (`AI`/`HUMAN`), `handoff_status` (`NONE`/`NEEDS_HUMAN`/`ASSIGNED`), archive (`is_archived`/`archived_at`), `resolved_at`, `closed_at`. Inbox fields: `last_message_at`, `last_message_preview`, `assigned_agent_id` (current owner; the database refuses to commit if it disagrees with the open OWNER row), `customer_name`/`customer_identifier` (search snapshots). `last_sequence_number` is the per-conversation message counter. `customer_id` is required for support chats and NULL for internal ones. |
+| `conversation_participants` | Who is in the chat (`CUSTOMER`/`AGENT`/`ASSISTANT`) with a role (`OWNER`/`VIEWER`/`MEMBER`) and `joined_at`/`left_at`. `participant_id` is NULL exactly for the assistant, which has no Backend 1 id. Membership only; **ownership is authoritative in `conversation_assignments`**.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `conversation_assignments`  | Assignment and transfer history: `agent_id`, `assigned_by`, `assignment_type` (`OWNER`/`VIEWER`), `assignment_action` (`TAKEOVER`/`ASSIGNED`/`TRANSFERRED`/`AUTO_ASSIGNED`), `assigned_at`, `ended_at` and `ended_by` (NULL = current), `note`. One open OWNER per conversation. `conversations.assigned_agent_id` mirrors the open OWNER row.                                                                                                                                                                                                                                                                                                                                         |
+| `conversation_activities`   | Timeline and audit: `actor_type`, `actor_id` (NULL = system), `activity_type` (status, priority, tag, archive, escalation changes), `description`, `metadata` (JSON).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Messaging
+
+| Table                  | Purpose                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `messages`             | `sequence_number` (unique per conversation; ordering and reconnect cursor), `client_id` (unique per conversation; idempotent retries), `sender_type`/`sender_id`, `message_type`, `content`, `metadata` (JSON payload for system messages), `status` (sender-facing summary), `reply_to_message_id`, `forwarded_from_message_id`, `is_edited`/`edited_at`, `deleted_at`/`deleted_by` (soft delete). |
+| `message_receipts`     | Per-recipient `delivered_at` / `read_at`; unique `(message_id, recipient_type, recipient_id)`.                                                                                                                                                                                                                                                                                                      |
+| `conversation_reads`   | Per-reader position: `last_read_message_id`, `last_read_sequence_number`, `marked_unread`. Unread count = `conversations.last_sequence_number - last_read_sequence_number` (approximate: includes system and own messages), or "has unread" when `marked_unread`.                                                                                                                                   |
+| `message_edit_history` | Previous content of each edit.                                                                                                                                                                                                                                                                                                                                                                      |
+| `message_reactions`    | One emoji per `(message, user_type, user_id)`.                                                                                                                                                                                                                                                                                                                                                      |
+
+### Attachments, notes, escalations, tags
+
+| Table                       | Purpose                                                                                                                                                                                                                                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `attachments`               | File metadata: `conversation_id` (for the Media & Files panel and access checks; an upload exists before its message), `storage_key` (unique), `file_name`, `mime_type`, `file_size`, `duration_ms` and `waveform` (voice), `checksum_sha256`, `upload_status` (indexed for orphan cleanup), `deleted_at`. |
+| `message_attachments`       | Join `(message_id, attachment_id, conversation_id)`; composite foreign keys ensure the message and attachment belong to the same conversation.                                                                                                                                                             |
+| `internal_notes`            | Agent-only notes, separate from `messages` so they can never be delivered to a customer: `author_agent_id`, `content`, `deleted_at`.                                                                                                                                                                       |
+| `note_mentions`             | `@mentioned` agents per note.                                                                                                                                                                                                                                                                              |
+| `conversation_escalations`  | `requested_by`, `reason`, `status`, `resolved_by`, `resolved_at`.                                                                                                                                                                                                                                          |
+| `tags`, `conversation_tags` | Tags (unique name, also unique ignoring case) and their links.                                                                                                                                                                                                                                             |
+
+### Notifications, presence, templates, automation, AI
+
+| Table                                 | Purpose                                                                                                               |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `notifications`                       | Per-recipient notification: `notification_type`, `title`, `body`, optional `conversation_id`/`message_id`, `read_at`. |
+| `notification_preferences`            | One row per agent: new-message, assignment, transfer, mention, sound and browser switches.                            |
+| `conversation_notification_settings`  | Per-agent mute: `is_muted` per `(conversation, agent)`.                                                               |
+| `agent_presence_history`              | Agent status periods. Live presence is in Redis; this is history.                                                     |
+| `canned_responses`                    | Templates: `shortcut`, `scope` (`PERSONAL`/`TEAM`), `team_id` (set exactly when `TEAM`), `created_by`, `is_active`.   |
+| `automation_rules`, `automation_logs` | Auto-reply rules (`trigger_type`, `conditions`, `response_content`) and their execution log.                          |
+| `ai_handoffs`                         | AI-to-human handoff requests; at most one `PENDING` per conversation.                                                 |
+| `ai_summaries`, `ai_suggestions`      | Generated summaries and per-agent reply suggestions.                                                                  |
+
+### Callbacks, calls, moderation, mobile and workspace
+
+| Table                                                                          | Purpose                                                                                                                                                    |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `callback_requests`                                                            | `scheduled_at`, `assigned_agent_id`, `created_by`, `status`, `notes`, `completion_note`, `reminder_sent_at`, `completed_at`.                               |
+| `calls`, `call_participants`                                                   | Call history: `call_type`, `status`, `started_at`, `ended_at`; participants with join/leave times. Media is not stored.                                    |
+| `spam_reports`, `customer_blocks`, `blocked_keywords`, `moderation_activities` | Spam reports (optionally of a message), customer blocks (one active per customer), keyword rules (unique ignoring case) and a moderation audit log.        |
+| `push_devices`                                                                 | FCM/APNs tokens for a `user_id` (external `users.id`, customer or agent): `platform`, `device_token`, `is_active`; unique `(platform, device_token)`.      |
+| `workspace_preferences`, `workspace_open_conversations`, `user_chat_settings`  | Per-agent layout JSON and restorable open tabs; per-user chat switches (typing and notification sounds, AI suggestions and summaries, auto-assign opt-in). |
+
+## Value sets (proposed)
+
+The DBML names only some of these in column notes; the rest are proposals, enforced by CHECKs in `constraints.sql`.
+Confirm them before the first migration.
+
+| Column                                                                                                                                 | Allowed values                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `conversations.conversation_type`                                                                                                      | `CUSTOMER_SUPPORT`, `INTERNAL`                                                                                                                                                                                                          |
+| `conversations.channel`                                                                                                                | `web`, `mobile`                                                                                                                                                                                                                         |
+| `conversations.created_by_type`                                                                                                        | `CUSTOMER`, `AGENT` (or NULL = system)                                                                                                                                                                                                  |
+| `conversations.status`                                                                                                                 | `OPEN`, `RESOLVED`, `CLOSED`                                                                                                                                                                                                            |
+| `conversations.priority`                                                                                                               | `HIGH`, `MEDIUM`, `LOW`                                                                                                                                                                                                                 |
+| `conversations.conversation_mode`                                                                                                      | `AI`, `HUMAN`                                                                                                                                                                                                                           |
+| `conversations.handoff_status`                                                                                                         | `NONE`, `NEEDS_HUMAN`, `ASSIGNED`                                                                                                                                                                                                       |
+| `messages.sender_type`                                                                                                                 | `CUSTOMER`, `AGENT`, `ASSISTANT`, `SYSTEM`                                                                                                                                                                                              |
+| `messages.message_type`                                                                                                                | `TEXT`, `IMAGE`, `FILE`, `AUDIO`, `VIDEO`, `VOICE`, `SYSTEM`                                                                                                                                                                            |
+| `messages.status`                                                                                                                      | `SENDING`, `SENT`, `DELIVERED`, `READ`, `FAILED`                                                                                                                                                                                        |
+| recipient, reader, editor, user, uploaded_by, reported_by, initiated_by, call participant, notification recipient, push owner `*_type` | `CUSTOMER`, `AGENT`                                                                                                                                                                                                                     |
+| `conversation_participants.participant_type`                                                                                           | `CUSTOMER`, `AGENT`, `ASSISTANT`                                                                                                                                                                                                        |
+| `conversation_participants.participant_role`                                                                                           | `OWNER`, `VIEWER`, `MEMBER`                                                                                                                                                                                                             |
+| `conversation_assignments.assignment_type`                                                                                             | `OWNER`, `VIEWER`                                                                                                                                                                                                                       |
+| `conversation_assignments.assignment_action`                                                                                           | `TAKEOVER`, `ASSIGNED`, `TRANSFERRED`, `AUTO_ASSIGNED`                                                                                                                                                                                  |
+| `conversation_activities.activity_type`                                                                                                | `STATUS_CHANGED`, `PRIORITY_CHANGED`, `ASSIGNED`, `TRANSFERRED`, `UNASSIGNED`, `ESCALATED`, `HANDOFF_REQUESTED`, `HANDOFF_ACCEPTED`, `TAG_ADDED`, `TAG_REMOVED`, `ARCHIVED`, `RESTORED`, `NOTE_ADDED`, `CALL`, `CALLBACK`, `MODERATION` |
+| `notifications.notification_type`                                                                                                      | `NEW_MESSAGE`, `NEW_CONVERSATION`, `HANDOFF`, `ASSIGNED`, `TRANSFERRED`, `MENTION`, `CALLBACK`, `CALL`, `SYSTEM`                                                                                                                        |
+| `moderation_activities.target_type`                                                                                                    | `CUSTOMER`, `CONVERSATION`, `MESSAGE`, `KEYWORD`, `SPAM_REPORT`                                                                                                                                                                         |
+| `attachments.upload_status`                                                                                                            | `PENDING`, `UPLOADED`, `FAILED`                                                                                                                                                                                                         |
+| `conversation_escalations.status`                                                                                                      | `PENDING`, `RESOLVED`, `CANCELLED`                                                                                                                                                                                                      |
+| `canned_responses.scope`                                                                                                               | `PERSONAL`, `TEAM`                                                                                                                                                                                                                      |
+| `ai_handoffs.requested_by_type`                                                                                                        | `AI`, `CUSTOMER`, `AGENT`, `SYSTEM`                                                                                                                                                                                                     |
+| `ai_handoffs.status`                                                                                                                   | `PENDING`, `ACCEPTED`, `COMPLETED`, `CANCELLED`                                                                                                                                                                                         |
+| `ai_suggestions.status`                                                                                                                | `PENDING`, `ACCEPTED`, `EDITED`, `DISMISSED`                                                                                                                                                                                            |
+| `callback_requests.status`                                                                                                             | `PENDING`, `COMPLETED`, `CANCELLED`, `MISSED`                                                                                                                                                                                           |
+| `calls.call_type`                                                                                                                      | `AUDIO`, `VIDEO`                                                                                                                                                                                                                        |
+| `calls.status`                                                                                                                         | `INITIATING`, `RINGING`, `ACTIVE`, `ENDED`, `DECLINED`, `MISSED`, `CANCELLED`, `FAILED`                                                                                                                                                 |
+| `spam_reports.status`                                                                                                                  | `PENDING`, `CONFIRMED`, `DISMISSED`                                                                                                                                                                                                     |
+| `push_devices.platform`                                                                                                                | `ANDROID`, `IOS`                                                                                                                                                                                                                        |
+| `agent_presence_history.status`                                                                                                        | `AVAILABLE`, `BUSY`, `AWAY`, `OFFLINE`                                                                                                                                                                                                  |
+
+## Database-enforced rules
+
+These were run against a scratch PostgreSQL (48 insert/update/delete cases) and behave as listed: valid rows accepted, violations rejected.
+
+| Rule                                                                                                          | Mechanism                                                                      |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `file_size`, `duration_ms`, sequence counters are `>= 0`; `sidebar_width > 0`                                 | CHECK                                                                          |
+| Fixed-value columns hold only allowed values                                                                  | CHECK (value sets above)                                                       |
+| Support chats have a `customer_id`; internal chats may not                                                    | CHECK                                                                          |
+| `handoff_status = ASSIGNED` <=> `assigned_agent_id` set, and requires human mode                              | CHECK                                                                          |
+| `is_archived` agrees with `archived_at`                                                                       | CHECK                                                                          |
+| `OPEN` has no resolved/closed time; `RESOLVED`/`CLOSED` carry theirs                                          | CHECK                                                                          |
+| At most one non-closed conversation per loan application                                                      | partial UNIQUE index                                                           |
+| One open OWNER per conversation; one open membership per participant                                          | partial UNIQUE indexes                                                         |
+| `conversations.assigned_agent_id` always equals the open OWNER row's agent (checked at COMMIT)                | deferred constraint trigger                                                    |
+| One pending escalation per conversation                                                                       | partial UNIQUE index                                                           |
+| `is_edited` agrees with `edited_at`; `deleted_by` needs `deleted_at`; a receipt is read after it is delivered | CHECK                                                                          |
+| A participant joins a call once                                                                               | UNIQUE `(call_id, participant_type, participant_id)`                           |
+| One pending AI handoff per conversation                                                                       | partial UNIQUE index                                                           |
+| One open presence period per agent                                                                            | partial UNIQUE index                                                           |
+| A reply points at a message in the same conversation; message numbers start at 1                              | composite FK + unique index, CHECK                                             |
+| A message can only link an attachment from its own conversation                                               | composite foreign keys                                                         |
+| The assistant participant has no id; others do; no backwards time ranges                                      | CHECK                                                                          |
+| Creator type and id set together                                                                              | CHECK                                                                          |
+| One active block per customer                                                                                 | partial UNIQUE index                                                           |
+| No duplicate message order or optimistic send                                                                 | UNIQUE `(conversation_id, sequence_number)` and `(conversation_id, client_id)` |
+| `SYSTEM` messages have no sender id; `TEXT` messages have content                                             | CHECK                                                                          |
+| `TEAM` template <=> `team_id` set                                                                             | CHECK                                                                          |
+| `COMPLETED` callback has `completed_at`; call ends after it starts                                            | CHECK                                                                          |
+| Tag names and blocked keywords unique ignoring case                                                           | UNIQUE index on `lower(...)`                                                   |
+
+Not enforced by the database (do it in the application): that every Backend 1 id exists, that a `*_type` matches the
+role Backend 1 reports for the id, permissions, attachment type and size limits, and retention.
+
+## Workflows
+
+**Customer message:** in one transaction, `UPDATE conversations SET last_sequence_number = last_sequence_number + 1,
+last_message_at = now(), last_message_preview = ... WHERE id = ? RETURNING last_sequence_number`, insert the message
+with that number, and (if `conversation_mode = AI`) queue the AI reply. The row lock serializes concurrent senders, so
+there are no gaps from races. If the AI escalates, set `handoff_status = NEEDS_HUMAN`, insert an `ai_handoffs` and a
+`conversation_activities` row, and notify agents.
+
+**Takeover / assign (race-safe):** in one transaction (a deferred trigger checks at COMMIT that the conversation pointer and the open OWNER row agree, so write both before committing), update the conversation only if `handoff_status =
+'NEEDS_HUMAN'` (0 rows = someone else won) setting `conversation_mode = 'HUMAN'`, `handoff_status = 'ASSIGNED'` and
+`assigned_agent_id`; end any open `OWNER` assignment (`ended_at`, `ended_by`); insert the new `conversation_assignments`
+row (the partial unique index is the backstop); accept the pending `ai_handoffs`; write an activity.
+
+**Agent message:** validate the caller holds the open `OWNER` assignment, insert (idempotent on `client_id`), return
+the ack mapping `client_id` to the new id, then record receipts as recipients acknowledge and update
+`messages.status`.
+
+**Unread:** `conversations.last_sequence_number - conversation_reads.last_read_sequence_number` for that reader.
+
+**Inbox filters:** Mine = `assigned_agent_id`; Unassigned = `handoff_status = 'NEEDS_HUMAN'` (served by a partial index on the queue); Archived =
+`is_archived`; name search = prefix match on `lower(customer_name)`.
+
+## Open decisions
+
+- **Protocol id.** The WebSocket protocol identifies a conversation by `slug` (for example `maya`); there is no `slug`
+  column. Either add one or change the protocol to use the numeric id as a string.
+- **Value sets** above are proposals; confirm them.
+- **Archive** is global (one flag per conversation), not per agent.
+- **Retention** (FR-10) needs a scheduled job; no schema support beyond soft delete.
+- **Snapshot refresh.** `customer_name` / `customer_identifier` go stale if Backend 1 changes them; decide how Backend 1
+  notifies this service.
+
+## Setup
+
+```bash
+pnpm install
+cp backend/.env.example backend/.env
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/chat?schema=public"
+pnpm db:generate                              # client -> backend/prisma/generated/prisma
+pnpm db:migrate --create-only     # then append backend/prisma/sql/constraints.sql to the new migration.sql
+pnpm db:migrate
 ```
-Customer ──<  Application  >── Conversation  >── Message
-  │            │                  │  │  │         │
-  └──< Conversations            │  │  │         └── Customer (sender)
-      └── Messages (customer)   │  │  └── Agent (assigned)
-      └── Files                 │  └── AgentConversation (assignments)
-                               │  └── Activities
-                               └── Files
-Agent ──< AgentConversation
-  │     └── Messages (agent)
-  ├── Activities
-  ├── Notifications
-  └── Settings
-```
 
-## Entities
+## Conversation DTO
 
-### 1. Customer
-
-| Column          | Type      | Notes                                    |
-|----------------|-----------|------------------------------------------------|
-| `id`           | UUID (PK) | Internal primary key                        |
-| `name`         | String    | Full name (was `ConversationDto.name`)      |
-| `avatar`       | String?   | Avatar URL (was `ConversationDto.avatar`)   |
-| `email`        | String?   | Email address                               |
-| `phone`        | String?   | Phone number (ApplicationsTable column)     |
-| `nationalId`   | String?   | NID (ApplicationsTable column)              |
-| `salary`       | String?   | Salary (ApplicationsTable column)           |
-| `occupation`   | String?   | Occupation (ApplicationsTable column)       |
-| `blacklisted`  | Boolean   | Blacklist flag (ApplicationsTable column)   |
-| `createdAt`    | DateTime  |                                            |
-| `updatedAt`    | DateTime  |                                            |
-
-**Why normalized**: `ConversationDto` currently stores `name` and `avatar`
-directly. These are customer attributes shared with the ApplicationsTable.
-A customer with multiple loan applications or conversations should not have
-their data duplicated.
-
-### 2. Agent
-
-| Column      | Type      | Notes                          |
-|------------|-----------|------------------------------------------------|
-| `id`        | UUID (PK) | Internal primary key          |
-| `name`      | String    | Full name                     |
-| `avatar`    | String?   | Avatar URL                    |
-| `email`     | String?   | Unique email                  |
-| `active`    | Boolean   | Whether the agent is available|
-| `createdAt` | DateTime  |                            |
-| `updatedAt` | DateTime  |                            |
-
-**Why added**: Messages with `side: "agent"` reference a specific support
-agent. The `conversation.takeover` flow assigns conversations to agents.
-Previously, agents were implicit; this table makes them first-class entities.
-
-### 3. Application
-
-| Column         | Type              | Notes                                    |
-|---------------|-------------------|------------------------------------------|
-| `id`           | UUID (PK)         | Internal primary key                     |
-| `appId`        | String (Unique)   | e.g. "61831" (was `Dto.application.appId`)|
-| `customerId`   | UUID? (FK)        | Nullable: applications may not have customers yet |
-| `reference`    | String (Unique)   | e.g. "LUL-61831-MAYA"                    |
-| `product`      | String            | e.g. "Instant Cash"                      |
-| `amount`       | String            | e.g. "$500"                              |
-| `tenor`        | String            | e.g. "30 days"                           |
-| `loanRequest`  | String?           | Loan Request column (ApplicationsTable)  |
-| `completeness` | String?           | Completeness column (ApplicationsTable)  |
-| `status`       | Enum              | `ApplicationStatus`                       |
-| `registeredAt` | DateTime?         | Registered Date column (ApplicationsTable)|
-| `createdAt`    | DateTime          |                                           |
-| `updatedAt`    | DateTime          |                                           |
-
-**Why normalized**: `ConversationDto.application` is an embedded object with
-6 fields. The ApplicationsTable displays additional fields (NID, phone, salary,
-occupation, loan request, completeness, registered date) that don't exist on
-the DTO. This table unifies both views.
-
-**Enum reconciliation**: The DTO uses string statuses like `"in progress"` and
-`"overdue"` (from seed.ts) while `ApplicationsTable.tsx` uses
-`"New" | "Reviewing" | "Completed" | "Failed" | "Paid Off"`. The
-`ApplicationStatus` enum covers both sets.
-
-### 4. Conversation
-
-| Column             | Type             | Notes                                      |
-|--------------------|------------------|--------------------------------------------|
-| `id`               | String (PK)      | External slug (e.g. "maya") for WS compat  |
-| `customerId`       | UUID? (FK)       | Nullable                                    |
-| `applicationId`    | String? (Unique) | 1:1 to Application                          |
-| `preview`          | String           | Last message preview                       |
-| `lastMessageAt`    | DateTime         | Timestamp of last message                  |
-| `unreadCount`      | Int              | Unread message count                       |
-| `urgent`           | Boolean          | Priority flag                              |
-| `handoff`          | Enum             | `HandoffStatus`: AI, NEEDS_HUMAN, ASSIGNED |
-| `assignedAgentId`  | UUID? (FK)       | Currently assigned agent                   |
-| `summary`          | String?          | AI-generated summary                       |
-| `summaryImage`     | String?          | Summary diagram URL                        |
-| `createdAt`        | DateTime         |                                            |
-| `updatedAt`        | DateTime         |                                            |
-
-**Key relationships**:
-- `customerId` → Customer (the customer in the conversation)
-- `applicationId` → Application (the loan this conversation is about)
-- `assignedAgentId` → Agent (via `Agent.assignedConversations`)
-- `messages` → Message[] (1:M)
-- `activities` → Activity[] (1:M, embedded in DTO as array)
-- `agentAssignments` → AgentConversation[] (1:M, assignment history)
-- `files` → SharedFile[] (1:M)
-
-### 5. Message
-
-| Column             | Type           | Notes                              |
-|--------------------|----------------|------------------------------------|
-| `id`               | String (PK)    | External ID (e.g. "maya-1", "c-<uuid>") |
-| `conversationId`   | String (FK)    | Parent conversation                |
-| `senderType`       | Enum           | `MessageSide`: CUSTOMER, ASSISTANT, AGENT |
-| `senderCustomerId` | UUID? (FK)     | Populated when `senderType=CUSTOMER`|
-| `senderAgentId`    | UUID? (FK)     | Populated when `senderType=AGENT`  |
-| `text`             | String         | Message content                    |
-| `status`           | Enum?          | `DeliveryStatus`: SENDING, SENT, … |
-| `createdAt`        | DateTime       | Timestamp                          |
-
-**Polymorphic sender**: `senderType` determines whether `senderCustomerId` or
-`senderAgentId` is populated. For `ASSISTANT` messages (AI), both are NULL.
-This avoids a polymorphic FK while still linking individual messages to the
-real person who sent them.
-
-### 6. Activity
-
-| Column          | Type       | Notes                              |
-|----------------|------------|------------------------------------|
-| `id`           | String (PK)| e.g. "a1"                          |
-| `conversationId`| String (FK)| Parent conversation               |
-| `agentId`      | UUID? (FK) | Nullable — many are system/AI     |
-| `tone`         | Enum       | `ActivityTone`: BLUE, CYAN, RED    |
-| `title`         | String     | Short label                       |
-| `time`          | String     | Display time (e.g. "09:12")       |
-| `copy`          | String     | Description text                  |
-| `createdAt`     | DateTime   |                                |
-
-**Why normalized**: `ConversationDto.activity` is an embedded array of
-`ActivityDto`. As a separate table, activity entries can be paginated, filtered
-by tone, and queried independently of conversations.
-
-### 7. AgentConversation (Assignment History)
-
-| Column           | Type       | Notes                             |
-|-----------------|------------|-----------------------------------|
-| `id`            | UUID (PK)  |                                   |
-| `agentId`       | UUID (FK)  | The agent                         |
-| `conversationId`| String (FK)| The conversation                  |
-| `role`          | Enum       | `AssignmentRole`: OWNER, VIEWER  |
-| `assignedAt`    | DateTime   | When assignment began             |
-| `unassignedAt`  | DateTime?  | When assignment ended (NULL = active)|
-
-**Why added**: The `conversation.takeover` flow changes a conversation's
-`handoff` to `ASSIGNED` and sets `assignedAgentId`, but there's no audit trail.
-This table records every assignment, enabling:
-- "Who handled this conversation?" queries
-- Workload analytics (time-to-response per agent)
-- Transfer history
-
-### 8. SharedFile
-
-| Column           | Type      | Notes                                    |
-|-----------------|-----------|------------------------------------------|
-| `id`            | UUID (PK) |                                          |
-| `conversationId`| String(FK)| Links file to its conversation           |
-| `customerId`    | UUID(FK)  | Links file to the customer               |
-| `applicationId` | UUID?(FK) | Links to the loan application            |
-| `name`          | String    | File name                                |
-| `kind`          | Enum      | `FileKind`: DOCUMENT, IMAGE              |
-| `size`          | String    | Human-readable size (e.g. "1.8 MB")      |
-| `url`           | String    | Storage URL for download                 |
-| `addedAt`       | String    | Display time (e.g. "Today, 09:06")       |
-| `createdAt`     | DateTime  |                                          |
-
-**Why normalized**: `SharedFile` in `share-files/model/store.ts` is a local
-Zustand array with no relationship to conversations. This table links shared
-files to the conversation, customer, and application, enabling the MediaFilesPanel
-to fetch files scoped to a customer or application.
-
-### 9. Setting
-
-| Column     | Type      | Notes                                  |
-|-----------|-----------|----------------------------------------|
-| `id`      | UUID (PK) |                                        |
-| `agentId` | UUID (FK) | Which agent's setting this is          |
-| `key`     | String    | e.g. "readReceipts", "aiReplies"       |
-| `value`   | Boolean   | On/off                                   |
-| `updatedAt`| DateTime |                                     |
-
-**Why added**: Settings from `message-settings` and `privacy-controls` are
-currently ephemeral Zustand state. Persisting them allows agent preferences to
-survive across sessions and devices.
-
-### 10. Notification
-
-| Column     | Type            | Notes                                  |
-|-----------|-----------------|----------------------------------------|
-| `id`      | UUID (PK)       |                                        |
-| `agentId` | UUID (FK)       | Recipient agent                        |
-| `type`    | Enum            | `NotificationType`                     |
-| `text`    | String          | Notification message                   |
-| `read`    | Boolean         | Whether the agent has seen it          |
-| `createdAt`| DateTime       | Chronological ordering                 |
-
-**Why added**: The Notifications feature (`features/notifications/`) is a
-placeholder. This table backs it with persisted, filterable notifications.
-
-## Mapping: Database → WebSocket DTOs
-
-The server composes DTOs from the normalized tables when sending `sync` and
-`conversation.updated` events. A materialized view (`conversation_dto`) is
-documented in the Prisma schema as SQL for reference.
-
-| DTO field                                        | Source table        |
-|--------------------------------------------------|---------------------|
-| `ConversationDto.id`                             | Conversation.id     |
-| `ConversationDto.name`                           | Customer.name       |
-| `ConversationDto.avatar`                         | Customer.avatar     |
-| `ConversationDto.preview`                        | Conversation.preview  |
-| `ConversationDto.lastMessageAt`                  | Conversation.lastMessageAt |
-| `ConversationDto.unread`                         | Conversation.unreadCount |
-| `ConversationDto.urgent`                         | Conversation.urgent |
-| `ConversationDto.handoff`                        | Conversation.handoff |
-| `ConversationDto.application.*`                  | Application.*       |
-| `ConversationDto.activity[]`                     | Activity[]          |
-| `ConversationDto.summary`                        | Conversation.summary |
-| `ConversationDto.summaryImage`                   | Conversation.summaryImage |
-| `ChatMessageDto.*`                               | Message.*           |
-| `ActivityDto.*`                                  | Activity.*          |
-
-## Indexes
-
-Key indexes for query performance:
-
-- `Conversation(handoff, unreadCount)` — dashboard filtering (unassigned / urgent)
-- `Conversation(lastMessageAt)` — conversation list ordering
-- `Message(conversationId, createdAt)` — message list pagination
-- `Message(conversationId, status)` — delivery status tracking
-- `Activity(conversationId, createdAt)` — activity timeline
-- `AgentConversation(conversationId, assignedAt)` — assignment history
-- `Notification(agentId, read)` — notification inbox
-- `Notification(createdAt)` — chronological notification ordering
-- `Customer(phone)`, `Customer(blacklisted)` — lookup by phone, blacklist checks
-
-## WebSocket Protocol Compatibility
-
-The schema preserves external string IDs used by the WebSocket protocol:
-- Conversation IDs like `"maya"`, `"gyna"` are used directly as `Conversation.id`
-- Message IDs like `"maya-1"` or `"c-<uuid>"` are used directly as `Message.id`
-- Activity IDs like `"a1"` are used directly as `Activity.id`
-
-This avoids a migration of existing WebSocket message references from the
-client side.
+`ConversationDto` is composed in the service layer: conversation rows from this database (inbox fields, handoff,
+priority, tags, activities) plus customer avatar/profile and loan application details fetched from Backend 1 by
+`customer_id` / `application_id`. There is no SQL view, because that data is not in this database.

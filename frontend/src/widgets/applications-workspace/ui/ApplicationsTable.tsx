@@ -1,7 +1,11 @@
+import type { ApplicationStatus as ProtocolApplicationStatus } from "@/shared/api/ws";
 import { assets } from "@/shared/config";
 import { AssetIcon, IconButton, notify, Icon } from "@/shared/ui";
 
-export type ApplicationStatus = "New" | "Reviewing" | "Completed" | "Failed" | "Paid Off";
+export type ApplicationStatus = Extract<
+  ProtocolApplicationStatus,
+  "New" | "Reviewing" | "Completed" | "Failed" | "Paid Off"
+>;
 export type ApplicationRow = { id: number; status: ApplicationStatus; occupation: string };
 
 const STATUS_CLASS: Record<ApplicationStatus, string> = {

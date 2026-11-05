@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "pnpm --filter @chat-dashboard/frontend dev",
     "build": "pnpm -r build",
+    "dev:backend": "pnpm --filter @chat-dashboard/backend dev",
     "preview": "pnpm --filter @chat-dashboard/frontend preview",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
@@ -13,7 +14,10 @@
     "test": "pnpm -r test",
     "format": "pnpm -r format",
     "format:check": "pnpm -r format:check",
-    "check": "pnpm typecheck && pnpm lint && pnpm check:fsd && pnpm format:check && pnpm test"
+    "check": "pnpm typecheck && pnpm lint && pnpm check:fsd && pnpm format:check && pnpm test",
+    "db:generate": "pnpm --filter @chat-dashboard/backend db:generate",
+    "db:validate": "pnpm --filter @chat-dashboard/backend db:validate",
+    "db:migrate": "pnpm --filter @chat-dashboard/backend db:migrate"
   },
   "devDependencies": {
     "prettier": "3"
