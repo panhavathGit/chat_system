@@ -8,298 +8,648 @@ datasource db {
   provider = "postgresql"
 }
 
-// ─── Enums ──────────────────────────────────────────────────────────────────
-
-/// Tracks the escalation state of a conversation between AI and human agents.
-/// Maps to HandoffStatus in protocol.ts: "ai" | "needs-human" | "assigned"
-enum HandoffStatus {
-  AI
-  NEEDS_HUMAN
-  ASSIGNED
-}
-
-/// Identifies who sent a message.
-/// Maps to MessageSide in protocol.ts: "customer" | "assistant" | "agent"
-enum MessageSide {
-  CUSTOMER
-  ASSISTANT
-  AGENT
-}
-
-/// Delivery/read status of a message (mirrors DeliveryStatus in protocol.ts).
-enum DeliveryStatus {
-  SENDING
-  SENT
-  DELIVERED
-  READ
-  FAILED
-}
-
-/// Visual tone for activity timeline entries (maps to ActivityDto.tone).
-enum ActivityTone {
-  BLUE
-  CYAN
-  RED
-}
-
-/// Lifecycle of a conversation, independent of who is handling it (handoff).
-enum ConversationStatus {
-  OPEN
-  RESOLVED
-  CLOSED
-}
-
-/// Kind of content carried by a message.
-enum MessageType {
-  TEXT
-  IMAGE
-  FILE
-  NOTE /// internal agent note, never delivered to the customer
-  SYSTEM /// e.g. "Agent X took over"
-}
-
-/// File classification in the media/shared-files panel.
-enum FileKind {
-  DOCUMENT
-  IMAGE
-}
-
-/// Role of an agent within an assignment (owner vs. read-only observer).
-enum AssignmentRole {
-  OWNER
-  VIEWER
-}
-
-/// Push transport of a registered device (FCM for Android, APNs for iOS).
-enum DevicePlatform {
-  ANDROID
-  IOS
-}
-
-/// Category of a system notification delivered to an agent.
-enum NotificationType {
-  NEW_CONVERSATION
-  HANDOFF
-  CALLBACK
-  MENTION
-  SYSTEM
-}
-
-// ─── Core Entities ──────────────────────────────────────────────────────────
+// GENERATED from docs/database-schema.dbml. Edit the DBML, then regenerate.
 //
-// This service (Backend 2, the chat backend) owns chat data only. Identity, users, agents,
-// customers, loan applications and authentication belong to Backend 1 (the main backend).
-// Columns named customerId / applicationId / agentId / userId / senderUserId hold Backend 1
-// ids as opaque strings with NO foreign key: they cannot be enforced across databases, and
-// the id format is defined by Backend 1 (not yet known, so VarChar(64) rather than Uuid).
-// Names, avatars, roles and loan details are fetched from Backend 1, never copied here.
+// This service (Backend 2, the chat backend) owns chat data. Backend 1 tables are documentation
+// references only and are not created in this database. Columns that hold a Backend 1 id
+// (customer_id, application_id, agent_id, user_id, *_by,
+// actor/participant/sender ids) are plain BigInt columns with NO foreign key.
+//
+// No database enums: fixed-value columns are VARCHAR strings whose allowed values are enforced by
+// CHECK constraints in prisma/sql/constraints.sql and listed in docs/database-schema.md.
+// Ids are auto-increment BigInt; convert to string when serializing to JSON.
 
-/// A chat conversation between a customer and one or more agents/AI.
-/// ConversationDto is composed from this table + Activity[] + customer/application
-/// details fetched from Backend 1.
+/// CUSTOMER_SUPPORT or INTERNAL. Customer and application are external references.
 model Conversation {
-  id              String             @id @default(uuid()) @db.Uuid
-  slug            String             @unique @db.VarChar(100) /// e.g. "maya" (external id the WS protocol/frontend uses today)
-  customerId      String             @map("customer_id") @db.VarChar(64) /// Backend 1 customer id
-  status          ConversationStatus @default(OPEN)
-  channel         String             @default("web") @db.VarChar(32) /// web | telegram | ...
-  closedAt        DateTime?          @map("closed_at")
-  applicationId   String?            @unique @map("application_id") @db.VarChar(64) /// Backend 1 loan application id; one conversation per application
-  preview         String             @db.VarChar(255) /// Last message preview (ConversationDto.preview)
-  lastMessageAt   DateTime           @map("last_message_at") /// ConversationDto.lastMessageAt
-  unreadCount     Int                @default(0) @map("unread_count") /// ConversationDto.unread
-  urgent          Boolean            @default(false) /// ConversationDto.urgent
-  handoff         HandoffStatus      @default(AI) /// ConversationDto.handoff
-  assignedAgentId String?            @map("assigned_agent_id") @db.VarChar(64) /// Backend 1 agent id of the current owner (HandoffStatus.ASSIGNED)
-  summary         String?            @db.Text /// ConversationDto.summary
-  summaryImage    String?            @map("summary_image") @db.VarChar(512) /// ConversationDto.summaryImage
-  createdAt       DateTime           @default(now()) @map("created_at")
-  updatedAt       DateTime           @updatedAt @map("updated_at")
+  id                               BigInt                            @id @default(autoincrement())
+  customerId                       BigInt?                           @map("customer_id") /// External customers.id. Required for CUSTOMER_SUPPORT, NULL for INTERNAL (CHECK)
+  applicationId                    BigInt?                           @map("application_id") /// External loan_applications.id
+  customerName                     String?                           @map("customer_name") @db.VarChar(150) /// Snapshot of the Backend 1 customer name so the inbox can be searched and sorted in SQL (FR-07); refresh when Backend 1 reports a change
+  customerIdentifier               String?                           @map("customer_identifier") @db.VarChar(100) /// Snapshot of a searchable identifier (customer_code, phone, application_number)
+  conversationType                 String                            @default("CUSTOMER_SUPPORT") @map("conversation_type") @db.VarChar(30)
+  channel                          String                            @default("web") @db.VarChar(32) /// web or mobile
+  createdByType                    String?                           @map("created_by_type") @db.VarChar(30) /// CUSTOMER or AGENT; NULL when created by the system
+  createdById                      BigInt?                           @map("created_by_id") /// External customers.id or agents.id; set exactly when created_by_type is set
+  status                           String                            @default("OPEN") @db.VarChar(30)
+  priority                         String                            @default("MEDIUM") @db.VarChar(20)
+  conversationMode                 String                            @default("AI") @map("conversation_mode") @db.VarChar(20)
+  handoffStatus                    String                            @default("NONE") @map("handoff_status") @db.VarChar(30)
+  assignedAgentId                  BigInt?                           @map("assigned_agent_id") /// External agents.id. Denormalized current OWNER from conversation_assignments for fast Mine/Unassigned filters; set exactly when handoff_status = ASSIGNED (CHECK)
+  subject                          String?                           @db.VarChar(255)
+  summary                          String?                           @db.Text
+  isArchived                       Boolean                           @default(false) @map("is_archived")
+  archivedAt                       DateTime?                         @map("archived_at") @db.Timestamptz(6)
+  resolvedAt                       DateTime?                         @map("resolved_at") @db.Timestamptz(6)
+  closedAt                         DateTime?                         @map("closed_at") @db.Timestamptz(6)
+  lastMessageAt                    DateTime                          @default(now()) @map("last_message_at") @db.Timestamptz(6)
+  lastMessagePreview               String?                           @map("last_message_preview") @db.VarChar(255) /// Denormalized; updated in the same transaction as the message insert
+  lastSequenceNumber               BigInt                            @default(0) @map("last_sequence_number") /// Last messages.sequence_number issued. Allocate with UPDATE ... SET last_sequence_number = last_sequence_number + 1 RETURNING
+  createdAt                        DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                        DateTime                          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  conversationParticipants         ConversationParticipant[]
+  conversationAssignments          ConversationAssignment[]
+  conversationActivities           ConversationActivity[]
+  messages                         Message[]
+  conversationReads                ConversationRead[]
+  attachments                      Attachment[]
+  internalNotes                    InternalNote[]
+  conversationEscalations          ConversationEscalation[]
+  conversationTags                 ConversationTag[]
+  notifications                    Notification[]
+  conversationNotificationSettings ConversationNotificationSetting[]
+  automationLogs                   AutomationLog[]
+  aiHandoffs                       AiHandoff[]
+  aiSummaries                      AiSummary[]
+  aiSuggestions                    AiSuggestion[]
+  callbackRequests                 CallbackRequest[]
+  calls                            Call[]
+  spamReports                      SpamReport[]
+  workspaceOpenConversations       WorkspaceOpenConversation[]
 
-  messages         Message[]
-  activities       Activity[]
-  agentAssignments AgentConversation[]
-  reads            ConversationRead[]
-  files            SharedFile[]
-
-  @@index([handoff, lastMessageAt])
   @@index([status, lastMessageAt])
-  @@index([lastMessageAt])
-  @@index([urgent, handoff])
   @@index([customerId])
-  @@index([assignedAgentId])
+  @@index([applicationId])
+  @@index([priority, lastMessageAt])
+  @@index([assignedAgentId, lastMessageAt])
+  @@index([isArchived, lastMessageAt])
+  @@index([conversationType])
   @@map("conversations")
 }
 
-/// An individual message within a conversation.
-/// Maps to ChatMessageDto; senderUserId is a Backend 1 id (customer or agent).
-/// For ASSISTANT messages (AI), senderUserId is NULL.
-model Message {
-  id             String          @id @default(uuid()) @db.Uuid
-  conversationId String          @map("conversation_id") @db.Uuid
-  senderType     MessageSide     @default(CUSTOMER) @map("sender_type")
-  senderUserId   String?         @map("sender_user_id") @db.VarChar(64) /// Backend 1 id of the customer or agent; NULL for ASSISTANT
-  type           MessageType     @default(TEXT)
-  text           String          @db.Text
-  clientId       String?         @map("client_id") @db.VarChar(64) /// client-generated id for optimistic sends (idempotency key)
-  status         DeliveryStatus? @default(SENT) /// sender-facing status; per-recipient detail is in MessageReceipt
-  createdAt      DateTime        @default(now()) @map("created_at")
-  editedAt       DateTime?       @map("edited_at")
-  deletedAt      DateTime?       @map("deleted_at") /// soft delete; never hard-delete messages
+model ConversationParticipant {
+  id              BigInt       @id @default(autoincrement())
+  conversationId  BigInt       @map("conversation_id")
+  participantType String       @map("participant_type") @db.VarChar(30) /// CUSTOMER, AGENT, ASSISTANT
+  participantId   BigInt?      @map("participant_id") /// External customers.id or agents.id; NULL exactly when ASSISTANT (CHECK)
+  participantRole String       @default("MEMBER") @map("participant_role") @db.VarChar(30) /// OWNER, VIEWER, MEMBER
+  joinedAt        DateTime     @default(now()) @map("joined_at") @db.Timestamptz(6)
+  leftAt          DateTime?    @map("left_at") @db.Timestamptz(6)
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
-  files    SharedFile[]
-  receipts MessageReceipt[]
+  @@index([conversationId])
+  @@index([participantType, participantId])
+  @@map("conversation_participants")
+}
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+model ConversationAssignment {
+  id               BigInt       @id @default(autoincrement())
+  conversationId   BigInt       @map("conversation_id")
+  agentId          BigInt       @map("agent_id") /// External agents.id
+  assignedBy       BigInt?      @map("assigned_by") /// External agents.id
+  assignmentType   String       @default("OWNER") @map("assignment_type") @db.VarChar(30) /// OWNER or VIEWER
+  assignmentAction String       @default("ASSIGNED") @map("assignment_action") @db.VarChar(30) /// TAKEOVER, ASSIGNED, TRANSFERRED, AUTO_ASSIGNED
+  note             String?      @db.VarChar(500)
+  assignedAt       DateTime     @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  endedAt          DateTime?    @map("ended_at") @db.Timestamptz(6)
+  endedBy          BigInt?      @map("ended_by") /// External agents.id; NULL when ended by the system
+  conversation     Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
 
-  @@unique([conversationId, clientId]) /// retry after reconnect must not duplicate
+  @@index([conversationId, endedAt])
+  @@index([agentId, endedAt])
+  @@map("conversation_assignments")
+}
+
+model ConversationActivity {
+  id             BigInt       @id @default(autoincrement())
+  conversationId BigInt       @map("conversation_id")
+  actorType      String       @map("actor_type") @db.VarChar(30)
+  actorId        BigInt?      @map("actor_id") /// External actor ID; null for system
+  activityType   String       @map("activity_type") @db.VarChar(50)
+  description    String?      @db.Text
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
   @@index([conversationId, createdAt])
-  @@index([conversationId, status])
-  @@index([senderUserId])
+  @@index([conversationId, activityType])
+  @@map("conversation_activities")
+}
+
+model Message {
+  id                     BigInt               @id @default(autoincrement())
+  conversationId         BigInt               @map("conversation_id")
+  clientId               String?              @map("client_id") @db.VarChar(100) /// Client-generated ID for duplicate prevention
+  sequenceNumber         BigInt               @map("sequence_number")
+  senderType             String               @map("sender_type") @db.VarChar(30) /// CUSTOMER, AGENT, ASSISTANT, SYSTEM
+  senderId               BigInt?              @map("sender_id") /// External sender ID, null for system
+  messageType            String               @default("TEXT") @map("message_type") @db.VarChar(30)
+  content                String?              @db.Text
+  metadata               Json? /// Payload for SYSTEM messages, e.g. who took over; call or callback references
+  replyToMessageId       BigInt?              @map("reply_to_message_id") /// Must be in the same conversation (composite FK with conversation_id)
+  forwardedFromMessageId BigInt?              @map("forwarded_from_message_id")
+  status                 String               @default("SENT") @db.VarChar(20) /// Sender-facing summary: SENDING, SENT, DELIVERED, READ, FAILED. Per-recipient detail is in message_receipts
+  isEdited               Boolean              @default(false) @map("is_edited")
+  editedAt               DateTime?            @map("edited_at") @db.Timestamptz(6)
+  deletedAt              DateTime?            @map("deleted_at") @db.Timestamptz(6)
+  deletedBy              BigInt?              @map("deleted_by") /// External agents.id
+  createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  conversation           Conversation         @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  replyToMessage         Message?             @relation(name: "MessageReplyToMessage", fields: [replyToMessageId, conversationId], references: [id, conversationId], onDelete: Restrict)
+  replies                Message[]            @relation("MessageReplyToMessage")
+  forwardedFromMessage   Message?             @relation(name: "MessageForwardedFromMessage", fields: [forwardedFromMessageId], references: [id], onDelete: SetNull)
+  forwards               Message[]            @relation("MessageForwardedFromMessage")
+  messageReceipts        MessageReceipt[]
+  conversationReads      ConversationRead[]
+  messageEditHistories   MessageEditHistory[]
+  messageReactions       MessageReaction[]
+  messageAttachments     MessageAttachment[]
+  notifications          Notification[]
+  automationLogs         AutomationLog[]
+  spamReports            SpamReport[]
+
+  @@unique([conversationId, sequenceNumber])
+  @@unique([conversationId, clientId])
+  @@unique([id, conversationId], map: "messages_id_conversation_key")
+  @@index([conversationId, createdAt])
+  @@index([senderType, senderId])
+  @@index([replyToMessageId])
+  @@index([forwardedFromMessageId])
   @@map("messages")
 }
 
-/// A timeline/activity event attached to a conversation.
-/// Maps to ActivityDto (tone, title, time, copy).
-model Activity {
-  id             String       @id @default(uuid()) @db.Uuid
-  conversationId String       @map("conversation_id") @db.Uuid
-  agentId        String?      @map("agent_id") @db.VarChar(64) /// Backend 1 agent id. Nullable — many activities are system/AI generated
-  tone           ActivityTone
-  title          String       @db.VarChar(255)
-  copy           String       @db.Text
-  createdAt      DateTime     @default(now()) @map("created_at") /// DTO "time" is derived from this
-
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  @@index([conversationId, createdAt])
-  @@map("activities")
-}
-
-/// Tracks the assignment history of agents to conversations.
-/// Every takeover / handoff creates a new row (closing the previous one).
-/// Enables audit of who owned which conversation and when.
-model AgentConversation {
-  id             String         @id @default(uuid()) @db.Uuid
-  agentId        String         @map("agent_id") @db.VarChar(64) /// Backend 1 agent id
-  conversationId String         @map("conversation_id") @db.Uuid
-  role           AssignmentRole @default(OWNER)
-  assignedAt     DateTime       @default(now()) @map("assigned_at")
-  unassignedAt   DateTime?      @map("unassigned_at")
-
-  /// Restrict: assignment history is an audit trail that shouldn't vanish with a chat.
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict, onUpdate: NoAction)
-
-  @@index([conversationId, assignedAt])
-  @@index([agentId])
-  @@map("agent_conversations")
-}
-
-/// A file shared in a conversation (media, documents).
-/// SharedFile in share-files/model/store.ts is currently a disconnected local
-/// store; this table links files to conversations, customers, and applications.
-model SharedFile {
-  id             String   @id @default(uuid()) @db.Uuid
-  conversationId String   @map("conversation_id") @db.Uuid
-  customerId     String   @map("customer_id") @db.VarChar(64) /// Backend 1 customer id
-  applicationId  String?  @map("application_id") @db.VarChar(64) /// Backend 1 loan application id
-  name           String   @db.VarChar(255)
-  kind           FileKind
-  messageId      String?  @map("message_id") @db.Uuid /// message the file was sent with, if any
-  sizeBytes      Int      @map("size_bytes") /// DTO formats as "1.8 MB"
-  mimeType       String?  @map("mime_type") @db.VarChar(127)
-  storageKey     String   @map("storage_key") @db.VarChar(512) /// object key in the bucket; download URLs are derived/signed from this
-  url            String?  @db.VarChar(1024) /// optional cached public URL (signed URLs expire, so do not rely on it)
-  checksumSha256 String?  @map("checksum_sha256") @db.Char(64)
-  createdAt      DateTime @default(now()) @map("created_at") /// DTO "addedAt" is derived from this
-
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  message      Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
-
-  @@index([conversationId])
-  @@index([customerId])
-  @@index([messageId])
-  @@map("shared_files")
-}
-
-/// A persistent agent preference (settings). Also read when deciding whether to push (flow I).
-/// Message settings and privacy controls currently live only in Zustand stores.
-model Setting {
-  id        String   @id @default(uuid()) @db.Uuid
-  agentId   String   @map("agent_id") @db.VarChar(64) /// Backend 1 agent id
-  key       String   @db.VarChar(100) /// e.g. "conversationAlerts", "readReceipts", "aiReplies"
-  value     Boolean  @default(false)
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-
-  @@unique([agentId, key])
-  @@map("settings")
-}
-
-/// A system notification for an agent.
-/// The Notifications feature (features/notifications/) is a placeholder;
-/// this table backs it with persisted, queryable data.
-model Notification {
-  id        String           @id @default(uuid()) @db.Uuid
-  agentId   String           @map("agent_id") @db.VarChar(64) /// Backend 1 agent id
-  type      NotificationType @default(SYSTEM)
-  text      String           @db.Text
-  read      Boolean          @default(false)
-  createdAt DateTime         @default(now()) @map("created_at")
-
-
-  @@index([agentId, read])
-  @@index([createdAt])
-  @@map("notifications")
-}
-
-/// Per-user read position in a conversation. conversations.unread_count stays
-/// as the shared inbox badge; this table gives each agent their own unread state.
-model ConversationRead {
-  userId         String   @map("user_id") @db.VarChar(64) /// Backend 1 user id
-  conversationId String   @map("conversation_id") @db.Uuid
-  lastReadAt     DateTime @map("last_read_at")
-
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  @@id([userId, conversationId])
-  @@index([conversationId])
-  @@map("conversation_reads")
-}
-
-/// Per-recipient delivery and read receipt (flows D/E). Message.status is the
-/// sender-facing summary; this table records who received/read it and when.
 model MessageReceipt {
-  messageId   String    @map("message_id") @db.Uuid
-  userId      String    @map("user_id") @db.VarChar(64) /// Backend 1 id of the recipient
-  deliveredAt DateTime? @map("delivered_at")
-  readAt      DateTime? @map("read_at")
+  id            BigInt    @id @default(autoincrement())
+  messageId     BigInt    @map("message_id")
+  recipientType String    @map("recipient_type") @db.VarChar(30)
+  recipientId   BigInt    @map("recipient_id")
+  deliveredAt   DateTime? @map("delivered_at") @db.Timestamptz(6)
+  readAt        DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  message       Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
-  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
-
-  @@id([messageId, userId])
-  @@index([userId])
+  @@unique([messageId, recipientType, recipientId])
+  @@index([recipientType, recipientId, readAt])
   @@map("message_receipts")
 }
 
-/// A mobile device registered for push notifications (FCM / APNs). Used when the
-/// recipient is offline and their notification settings allow it (flow I).
-model DeviceToken {
-  id        String         @id @default(uuid()) @db.Uuid
-  userId    String         @map("user_id") @db.VarChar(64) /// Backend 1 user id
-  platform  DevicePlatform
-  token     String         @unique @db.VarChar(512) /// FCM registration token or APNs device token
-  revokedAt DateTime?      @map("revoked_at") /// set when the provider reports the token invalid
-  createdAt DateTime       @default(now()) @map("created_at")
-  updatedAt DateTime       @updatedAt @map("updated_at")
+model ConversationRead {
+  id                     BigInt       @id @default(autoincrement())
+  conversationId         BigInt       @map("conversation_id")
+  readerType             String       @map("reader_type") @db.VarChar(30)
+  readerId               BigInt       @map("reader_id")
+  lastReadMessageId      BigInt?      @map("last_read_message_id")
+  lastReadSequenceNumber BigInt       @default(0) @map("last_read_sequence_number") /// Unread count = conversations.last_sequence_number - this (approximate: includes own and system messages)
+  lastReadAt             DateTime?    @map("last_read_at") @db.Timestamptz(6)
+  markedUnread           Boolean      @default(false) @map("marked_unread") /// Agent manually marked the conversation unread (FR-05)
+  createdAt              DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  conversation           Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  lastReadMessage        Message?     @relation(fields: [lastReadMessageId, conversationId], references: [id, conversationId], onDelete: Restrict)
 
-  @@index([userId])
-  @@map("device_tokens")
+  @@unique([conversationId, readerType, readerId])
+  @@index([lastReadMessageId])
+  @@map("conversation_reads")
 }
 
-// ─── Composition (not managed by Prisma) ───────────────────────────────────
+model MessageEditHistory {
+  id              BigInt   @id @default(autoincrement())
+  messageId       BigInt   @map("message_id")
+  editorType      String   @map("editor_type") @db.VarChar(30)
+  editorId        BigInt   @map("editor_id")
+  previousContent String   @map("previous_content") @db.Text
+  editedAt        DateTime @default(now()) @map("edited_at") @db.Timestamptz(6)
+  message         Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
-/// The WebSocket `sync` event returns `ConversationDto[]`. It is composed in the service layer:
-/// conversation rows from this database (inbox fields, handoff, activities) plus customer
-/// name/avatar and loan application details fetched from Backend 1 by `customerId` and
-/// `applicationId`. There is no SQL view, because that data is not in this database.
+  @@index([messageId, editedAt])
+  @@map("message_edit_history")
+}
+
+model MessageReaction {
+  id        BigInt   @id @default(autoincrement())
+  messageId BigInt   @map("message_id")
+  userType  String   @map("user_type") @db.VarChar(30)
+  userId    BigInt   @map("user_id")
+  emoji     String   @db.VarChar(50)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userType, userId, emoji])
+  @@map("message_reactions")
+}
+
+model Attachment {
+  id                 BigInt              @id @default(autoincrement())
+  conversationId     BigInt              @map("conversation_id") /// Needed for the Media & Files panel and access control; an upload exists before its message
+  uploadedByType     String              @map("uploaded_by_type") @db.VarChar(30)
+  uploadedById       BigInt              @map("uploaded_by_id")
+  storageKey         String              @unique @map("storage_key") @db.VarChar(500)
+  fileName           String              @map("file_name") @db.VarChar(255)
+  mimeType           String              @map("mime_type") @db.VarChar(150)
+  fileSize           BigInt              @map("file_size")
+  durationMs         Int?                @map("duration_ms") /// Audio, video and voice messages (FR-18)
+  waveform           Json? /// Voice message amplitude samples
+  checksumSha256     String?             @map("checksum_sha256") @db.VarChar(64)
+  uploadStatus       String              @default("PENDING") @map("upload_status") @db.VarChar(30)
+  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt          DateTime?           @map("deleted_at") @db.Timestamptz(6)
+  conversation       Conversation        @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  messageAttachments MessageAttachment[]
+
+  @@unique([id, conversationId], map: "attachments_id_conversation_key")
+  @@index([conversationId, createdAt])
+  @@index([uploadedByType, uploadedById])
+  @@index([uploadStatus, createdAt])
+  @@map("attachments")
+}
+
+model MessageAttachment {
+  messageId      BigInt     @map("message_id")
+  attachmentId   BigInt     @map("attachment_id")
+  conversationId BigInt     @map("conversation_id")
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  message        Message    @relation(fields: [messageId, conversationId], references: [id, conversationId], onDelete: Cascade)
+  attachment     Attachment @relation(fields: [attachmentId, conversationId], references: [id, conversationId], onDelete: Cascade)
+
+  @@id([messageId, attachmentId])
+  @@index([conversationId])
+  @@index([attachmentId])
+  @@map("message_attachments")
+}
+
+model InternalNote {
+  id             BigInt        @id @default(autoincrement())
+  conversationId BigInt        @map("conversation_id")
+  authorAgentId  BigInt        @map("author_agent_id") /// External agents.id
+  content        String        @db.Text
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime?     @map("deleted_at") @db.Timestamptz(6)
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  noteMentions   NoteMention[]
+
+  @@index([conversationId, createdAt])
+  @@map("internal_notes")
+}
+
+model NoteMention {
+  id               BigInt       @id @default(autoincrement())
+  noteId           BigInt       @map("note_id")
+  mentionedAgentId BigInt       @map("mentioned_agent_id") /// External agents.id
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  note             InternalNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@unique([noteId, mentionedAgentId])
+  @@index([mentionedAgentId])
+  @@map("note_mentions")
+}
+
+model ConversationEscalation {
+  id             BigInt       @id @default(autoincrement())
+  conversationId BigInt       @map("conversation_id")
+  requestedBy    BigInt       @map("requested_by") /// External agents.id
+  reason         String?      @db.Text
+  status         String       @default("PENDING") @db.VarChar(30)
+  resolvedBy     BigInt?      @map("resolved_by") /// External agents.id
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt     DateTime?    @map("resolved_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, status])
+  @@map("conversation_escalations")
+}
+
+model Tag {
+  id               BigInt            @id @default(autoincrement())
+  name             String            @unique @db.VarChar(100)
+  color            String?           @db.VarChar(30)
+  createdBy        BigInt?           @map("created_by") /// External agents.id
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  conversationTags ConversationTag[]
+
+  @@map("tags")
+}
+
+model ConversationTag {
+  conversationId BigInt       @map("conversation_id")
+  tagId          BigInt       @map("tag_id")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  tag            Tag          @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, tagId])
+  @@index([tagId])
+  @@map("conversation_tags")
+}
+
+model Notification {
+  id               BigInt        @id @default(autoincrement())
+  recipientType    String        @map("recipient_type") @db.VarChar(30)
+  recipientId      BigInt        @map("recipient_id") /// External Backend 1 ID
+  conversationId   BigInt?       @map("conversation_id")
+  messageId        BigInt?       @map("message_id")
+  notificationType String        @map("notification_type") @db.VarChar(50)
+  title            String        @db.VarChar(255)
+  body             String?       @db.Text
+  readAt           DateTime?     @map("read_at") @db.Timestamptz(6)
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  conversation     Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  message          Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([recipientType, recipientId, createdAt])
+  @@index([recipientType, recipientId, readAt])
+  @@index([conversationId])
+  @@index([messageId])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id                BigInt   @id @default(autoincrement())
+  agentId           BigInt   @unique @map("agent_id") /// External agents.id
+  newMessageEnabled Boolean  @default(true) @map("new_message_enabled")
+  assignmentEnabled Boolean  @default(true) @map("assignment_enabled")
+  transferEnabled   Boolean  @default(true) @map("transfer_enabled")
+  mentionEnabled    Boolean  @default(true) @map("mention_enabled")
+  soundEnabled      Boolean  @default(true) @map("sound_enabled")
+  browserEnabled    Boolean  @default(true) @map("browser_enabled")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("notification_preferences")
+}
+
+model ConversationNotificationSetting {
+  id             BigInt       @id @default(autoincrement())
+  conversationId BigInt       @map("conversation_id")
+  agentId        BigInt       @map("agent_id") /// External agents.id
+  isMuted        Boolean      @default(false) @map("is_muted")
+  updatedAt      DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, agentId])
+  @@index([agentId])
+  @@map("conversation_notification_settings")
+}
+
+/// History only. Live presence (Available/Busy/Away/Offline) is kept in Redis.
+model AgentPresenceHistory {
+  id        BigInt    @id @default(autoincrement())
+  agentId   BigInt    @map("agent_id") /// External agents.id
+  status    String    @db.VarChar(30) /// AVAILABLE, BUSY, AWAY, OFFLINE
+  startedAt DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  endedAt   DateTime? @map("ended_at") @db.Timestamptz(6)
+
+  @@index([agentId, endedAt])
+  @@map("agent_presence_history")
+}
+
+model CannedResponse {
+  id        BigInt   @id @default(autoincrement())
+  title     String   @db.VarChar(255)
+  content   String   @db.Text
+  shortcut  String?  @db.VarChar(50) /// e.g. /greeting
+  scope     String   @default("PERSONAL") @db.VarChar(30) /// PERSONAL or TEAM
+  teamId    BigInt?  @map("team_id") /// External team id; set exactly when scope = TEAM (CHECK)
+  createdBy BigInt   @map("created_by") /// External agents.id
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([createdBy, isActive])
+  @@index([teamId, isActive])
+  @@map("canned_responses")
+}
+
+model AutomationRule {
+  id              BigInt          @id @default(autoincrement())
+  name            String          @db.VarChar(255)
+  triggerType     String          @map("trigger_type") @db.VarChar(50)
+  conditions      Json?
+  responseContent String          @map("response_content") @db.Text
+  priority        Int             @default(0)
+  isActive        Boolean         @default(true) @map("is_active")
+  createdBy       BigInt?         @map("created_by") /// External agents.id
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  automationLogs  AutomationLog[]
+
+  @@index([isActive, triggerType, priority])
+  @@map("automation_rules")
+}
+
+model AutomationLog {
+  id              BigInt         @id @default(autoincrement())
+  ruleId          BigInt         @map("rule_id")
+  conversationId  BigInt         @map("conversation_id")
+  messageId       BigInt?        @map("message_id")
+  executionStatus String         @map("execution_status") @db.VarChar(30)
+  errorMessage    String?        @map("error_message") @db.Text
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  rule            AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  conversation    Conversation   @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  message         Message?       @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([ruleId, createdAt])
+  @@index([conversationId])
+  @@index([messageId])
+  @@map("automation_logs")
+}
+
+/// At most one PENDING handoff per conversation (partial unique index).
+model AiHandoff {
+  id              BigInt       @id @default(autoincrement())
+  conversationId  BigInt       @map("conversation_id")
+  requestedByType String       @map("requested_by_type") @db.VarChar(30)
+  requestedById   BigInt?      @map("requested_by_id")
+  reason          String?      @db.Text
+  status          String       @default("PENDING") @db.VarChar(30)
+  acceptedBy      BigInt?      @map("accepted_by") /// External agents.id
+  requestedAt     DateTime     @default(now()) @map("requested_at") @db.Timestamptz(6)
+  acceptedAt      DateTime?    @map("accepted_at") @db.Timestamptz(6)
+  completedAt     DateTime?    @map("completed_at") @db.Timestamptz(6)
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, status])
+  @@map("ai_handoffs")
+}
+
+model AiSummary {
+  id             BigInt       @id @default(autoincrement())
+  conversationId BigInt       @map("conversation_id")
+  summary        String       @db.Text
+  modelVersion   String?      @map("model_version") @db.VarChar(100)
+  generatedAt    DateTime     @default(now()) @map("generated_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, generatedAt])
+  @@map("ai_summaries")
+}
+
+model AiSuggestion {
+  id             BigInt       @id @default(autoincrement())
+  conversationId BigInt       @map("conversation_id")
+  agentId        BigInt       @map("agent_id") /// External agents.id
+  suggestion     String       @db.Text
+  status         String       @default("PENDING") @db.VarChar(30)
+  finalContent   String?      @map("final_content") @db.Text
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, agentId])
+  @@map("ai_suggestions")
+}
+
+model CallbackRequest {
+  id              BigInt       @id @default(autoincrement())
+  conversationId  BigInt       @map("conversation_id")
+  customerId      BigInt       @map("customer_id") /// External customers.id
+  assignedAgentId BigInt?      @map("assigned_agent_id") /// External agents.id
+  createdBy       BigInt?      @map("created_by") /// External agents.id
+  scheduledAt     DateTime     @map("scheduled_at") @db.Timestamptz(6)
+  status          String       @default("PENDING") @db.VarChar(30)
+  notes           String?      @db.Text
+  completionNote  String?      @map("completion_note") @db.Text
+  reminderSentAt  DateTime?    @map("reminder_sent_at") @db.Timestamptz(6) /// Set when the upcoming-callback notification was sent
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt     DateTime?    @map("completed_at") @db.Timestamptz(6)
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([assignedAgentId, status, scheduledAt])
+  @@index([status, scheduledAt])
+  @@index([conversationId])
+  @@index([customerId])
+  @@map("callback_requests")
+}
+
+/// Signalling record and call history; media is not stored.
+model Call {
+  id               BigInt            @id @default(autoincrement())
+  conversationId   BigInt            @map("conversation_id")
+  initiatedByType  String            @map("initiated_by_type") @db.VarChar(30)
+  initiatedById    BigInt            @map("initiated_by_id")
+  callType         String            @map("call_type") @db.VarChar(20)
+  status           String            @default("INITIATING") @db.VarChar(30)
+  startedAt        DateTime?         @map("started_at") @db.Timestamptz(6)
+  endedAt          DateTime?         @map("ended_at") @db.Timestamptz(6)
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  conversation     Conversation      @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  callParticipants CallParticipant[]
+
+  @@index([conversationId, createdAt])
+  @@map("calls")
+}
+
+model CallParticipant {
+  id              BigInt    @id @default(autoincrement())
+  callId          BigInt    @map("call_id")
+  participantType String    @map("participant_type") @db.VarChar(30)
+  participantId   BigInt    @map("participant_id")
+  joinedAt        DateTime? @map("joined_at") @db.Timestamptz(6)
+  leftAt          DateTime? @map("left_at") @db.Timestamptz(6)
+  call            Call      @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, participantType, participantId])
+  @@index([participantType, participantId])
+  @@map("call_participants")
+}
+
+model SpamReport {
+  id             BigInt       @id @default(autoincrement())
+  conversationId BigInt       @map("conversation_id")
+  reportedByType String       @map("reported_by_type") @db.VarChar(30)
+  reportedById   BigInt       @map("reported_by_id")
+  messageId      BigInt?      @map("message_id") /// The reported message, if any
+  reason         String       @db.Text
+  status         String       @default("PENDING") @db.VarChar(30)
+  reviewedBy     BigInt?      @map("reviewed_by") /// External agents.id
+  reviewedAt     DateTime?    @map("reviewed_at") @db.Timestamptz(6)
+  resolutionNote String?      @map("resolution_note") @db.VarChar(500)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  message        Message?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([conversationId])
+  @@index([messageId])
+  @@map("spam_reports")
+}
+
+/// One active block (unblocked_at IS NULL) per customer via a partial unique index.
+model CustomerBlock {
+  id          BigInt    @id @default(autoincrement())
+  customerId  BigInt    @map("customer_id") /// External customers.id
+  blockedBy   BigInt    @map("blocked_by") /// External agents.id
+  reason      String?   @db.Text
+  blockedAt   DateTime  @default(now()) @map("blocked_at") @db.Timestamptz(6)
+  unblockedAt DateTime? @map("unblocked_at") @db.Timestamptz(6)
+  unblockedBy BigInt?   @map("unblocked_by") /// External agents.id
+
+  @@index([customerId, unblockedAt])
+  @@map("customer_blocks")
+}
+
+model BlockedKeyword {
+  id        BigInt   @id @default(autoincrement())
+  keyword   String   @unique @db.VarChar(255)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdBy BigInt?  @map("created_by") /// External agents.id
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("blocked_keywords")
+}
+
+model ModerationActivity {
+  id         BigInt   @id @default(autoincrement())
+  actorId    BigInt   @map("actor_id") /// External agents.id
+  action     String   @db.VarChar(100)
+  targetType String   @map("target_type") @db.VarChar(50)
+  targetId   BigInt   @map("target_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId])
+  @@map("moderation_activities")
+}
+
+model PushDevice {
+  id          BigInt    @id @default(autoincrement())
+  userId      BigInt    @map("user_id") /// External users.id (every customer and agent has one)
+  platform    String    @db.VarChar(30)
+  deviceToken String    @map("device_token") @db.VarChar(512)
+  isActive    Boolean   @default(true) @map("is_active")
+  lastSeenAt  DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([platform, deviceToken])
+  @@index([userId])
+  @@map("push_devices")
+}
+
+model WorkspacePreference {
+  id           BigInt   @id @default(autoincrement())
+  agentId      BigInt   @unique @map("agent_id") /// External agents.id
+  layout       Json?
+  sidebarWidth Int?     @map("sidebar_width")
+  settings     Json?
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("workspace_preferences")
+}
+
+model WorkspaceOpenConversation {
+  id             BigInt       @id @default(autoincrement())
+  agentId        BigInt       @map("agent_id") /// External agents.id
+  conversationId BigInt       @map("conversation_id")
+  sortOrder      Int          @default(0) @map("sort_order")
+  lastOpenedAt   DateTime     @default(now()) @map("last_opened_at") @db.Timestamptz(6)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, conversationId])
+  @@index([conversationId])
+  @@map("workspace_open_conversations")
+}
+
+model UserChatSetting {
+  id                       BigInt   @id @default(autoincrement())
+  userId                   BigInt   @unique @map("user_id") /// External users.id
+  typingSoundEnabled       Boolean  @default(true) @map("typing_sound_enabled")
+  notificationSoundEnabled Boolean  @default(true) @map("notification_sound_enabled")
+  aiSuggestionsEnabled     Boolean  @default(true) @map("ai_suggestions_enabled")
+  aiSummariesEnabled       Boolean  @default(true) @map("ai_summaries_enabled")
+  autoAssignEnabled        Boolean  @default(false) @map("auto_assign_enabled") /// Opt in to auto-assignment (only when authorized)
+  updatedAt                DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("user_chat_settings")
+}

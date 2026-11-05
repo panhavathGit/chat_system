@@ -54,32 +54,40 @@ read-only or hidden. Supervisors see everything.
 
 ## 4. Conversation states
 
-`handoff` (who is handling) is separate from `status` (lifecycle).
+Three separate fields on `conversations`: `status` (lifecycle), `conversation_mode` (`AI` or `HUMAN`, who answers) and
+`handoff_status` (`NONE`, `NEEDS_HUMAN`, `ASSIGNED`). The authoritative owner is the open `OWNER` row in
+`conversation_assignments` (`ended_at IS NULL`); `conversations.assigned_agent_id` mirrors it for fast inbox filters
+and is set exactly when `handoff_status = ASSIGNED`.
 
 ```
-AI --(escalate / callback / customer asks)--> NEEDS_HUMAN --(takeover)--> ASSIGNED
- ^                                                                          |
- '----------------------(release / resolve)--------------------------------'
+NONE --(escalate / callback / customer asks)--> NEEDS_HUMAN --(takeover)--> ASSIGNED
+ ^                                                                            |
+ '------------------------(release / resolve)--------------------------------'
 ```
 
-- `status`: `OPEN` -> `RESOLVED` -> `CLOSED`. A new customer message reopens a resolved or
-  closed conversation (`status = OPEN`, `closed_at = NULL`).
-- Database rules: `handoff = ASSIGNED` exactly when `assigned_agent_id` is set; `closed_at`
-  is set exactly when `status != OPEN`.
+- `status`: `OPEN` -> `RESOLVED` -> `CLOSED`. A new customer message reopens a resolved or closed conversation
+  (`status = OPEN`, `resolved_at` and `closed_at` cleared).
+- Database rules: `ASSIGNED` requires `conversation_mode = HUMAN`; `OPEN` has no `resolved_at`/`closed_at`;
+  `is_archived` agrees with `archived_at`; one open `OWNER` row per conversation.
+- The value sets for these fields are proposals; see `docs/database-schema.md`.
 
 ## 5. Core flows
 
 ### 5.1 Customer sends a message
 
 1. In one transaction:
-   - insert the message (`sender_type = CUSTOMER`);
-   - update the conversation: `preview`, `last_message_at`, `unread_count + 1`;
+   - `UPDATE conversations SET last_sequence_number = last_sequence_number + 1, last_message_at = now(),
+last_message_preview = ... RETURNING last_sequence_number` (the row lock serializes senders);
+   - insert the message with that `sequence_number` (`sender_type = CUSTOMER`, idempotent on `client_id`);
    - if the conversation was `RESOLVED` or `CLOSED`, reopen it.
 2. Emit `message.new` and `conversation.updated` to the sockets allowed to see it.
-3. Branch on `handoff`:
+3. Branch on `conversation_mode` and `handoff_status`:
    - `AI`: enqueue the AI job.
    - `NEEDS_HUMAN`: nothing more; the conversation waits in the queue.
    - `ASSIGNED`: notify only the owner.
+
+The inbox preview is `last_message_preview`. A reader's unread count is `conversations.last_sequence_number` minus
+that reader's `conversation_reads.last_read_sequence_number`.
 
 Before building any DTO that needs customer or loan data, the service fetches it from Backend 1 by
 `customer_id` / `application_id` (agent opens a conversation: flow G). That data is not stored here.
@@ -89,27 +97,27 @@ application with Backend 1, then finds the existing active conversation for that
 
 ### 5.2 AI reply and escalation (queue job)
 
-1. Re-read the conversation. If `handoff` is no longer `AI` (an agent took over in the
+1. Re-read the conversation. If `conversation_mode` is no longer `AI` (an agent took over in the
    meantime), drop the job.
-2. Generate the reply and insert `ASSISTANT` messages (no sender).
+2. Generate the reply and insert `ASSISTANT` messages.
 3. If the AI decides to escalate, or the customer asked for a person:
-   - set `handoff = NEEDS_HUMAN` and `urgent = true`;
-   - insert a `SYSTEM` message and an `activities` entry;
-   - create `HANDOFF` notifications for available agents.
+   - set `handoff_status = NEEDS_HUMAN` and raise `priority` if needed;
+   - insert an `ai_handoffs` row (`PENDING`), a `SYSTEM` message and a `conversation_activities` row;
+   - create `notifications` for available agents.
 
 ### 5.3 Agent sends a message (`message.send`)
 
-1. Permission: the sender must be the active owner of the conversation. Otherwise reply
-   with `message.error`.
+1. Permission: the sender must hold the open `OWNER` assignment. Otherwise reply with `message.error`.
 2. Insert the message. The unique key `(conversation_id, client_id)` makes this idempotent:
    on a duplicate-key error, load the existing row and re-send the ack.
-3. Update the conversation preview and time, and reset `unread_count`.
+3. Update `last_message_at`, `last_message_preview` and `last_sequence_number` as in 5.1.
 4. Reply `message.ack` carrying both `clientId` and the real message `id`.
 5. Deliver through the customer's channel, then emit `message.status`:
    `sent` -> `delivered` -> `read`, or `failed` on error. Each recipient's delivery and read
    acknowledgement is saved in `message_receipts` before the status is relayed to the sender.
-6. If the recipient has no live socket and their settings allow it, send a push notification
-   (FCM / APNs) to their non-revoked `device_tokens`. Mark a token `revoked_at` when the provider rejects it.
+   Keep `messages.status` (SENT, DELIVERED, READ, FAILED) in step with the receipts.
+6. If the recipient has no live socket and their `notification_preferences` allow it, send a push notification
+   (FCM / APNs) to their active `push_devices` (`user_id`). Set `is_active = false` when the provider rejects a token.
 
 ### 5.4 Takeover (`conversation.takeover`)
 
@@ -118,52 +126,53 @@ Must be safe against two agents clicking at once. The conditional update decides
 ```ts
 await prisma.$transaction(async (tx) => {
   const won = await tx.conversation.updateMany({
-    where: { id, handoff: { in: ["NEEDS_HUMAN", "AI"] } }, // "AI" only if the caller is a supervisor
-    data: { handoff: "ASSIGNED", assignedAgentId: agentId, unreadCount: 0 },
+    where: { id, handoffStatus: "NEEDS_HUMAN" }, // a supervisor may also take an "AI" conversation
+    data: { conversationMode: "HUMAN", handoffStatus: "ASSIGNED", assignedAgentId: agentId },
   });
   if (won.count === 0) throw new ConflictError("Already taken"); // loser receives an error event
 
-  await tx.agentConversation.updateMany({
-    where: { conversationId: id, unassignedAt: null, role: "OWNER" },
-    data: { unassignedAt: new Date() },
+  await tx.conversationAssignment.updateMany({
+    where: { conversationId: id, endedAt: null, assignmentType: "OWNER" },
+    data: { endedAt: new Date(), endedBy: agentId },
   });
-  await tx.agentConversation.create({
-    data: { agentId, conversationId: id, role: "OWNER" },
+  await tx.conversationAssignment.create({
+    data: { conversationId: id, agentId, assignedBy: agentId, assignmentType: "OWNER", assignmentAction: "TAKEOVER" },
   });
-  await tx.message.create({
-    data: { conversationId: id, senderType: "ASSISTANT", type: "SYSTEM", text: "Agent took over" },
-  });
+  // also: SYSTEM message, conversation_activities row, ai_handoffs -> ACCEPTED
 });
 ```
 
+Update the conversation pointer and the assignment rows in the same transaction; the database checks at commit that
+`conversations.assigned_agent_id` matches the open `OWNER` row and rolls the transaction back otherwise.
+
 Then emit `conversation.assigned`, `conversation.updated` and a notice. The database backs
-this up: a CHECK keeps `handoff` and `assigned_agent_id` consistent, and a unique index
-prevents two active owners.
+this up: a partial unique index prevents two open `OWNER` rows, and a CHECK ties `ASSIGNED` to human mode.
 
 ### 5.5 Release, reassign, resolve
 
 These events are not in the protocol yet and need to be added.
 
-- **Release:** set `handoff = AI` (or `NEEDS_HUMAN`) and `assigned_agent_id = NULL` in a
-  single statement, and close the owner row (`unassigned_at`).
-- **Reassign (supervisor only):** same as takeover, with the target agent chosen by the
-  supervisor.
-- **Resolve:** `status = RESOLVED`, `closed_at = now`, and release the agent.
-  A scheduled job moves idle `RESOLVED` conversations to `CLOSED` after N days.
+- **Release:** end the open `OWNER` row (`ended_at`, `ended_by`), clear `assigned_agent_id` and set
+  `handoff_status = NEEDS_HUMAN` (or `NONE` with `conversation_mode = AI`) in the same transaction.
+- **Reassign (supervisor only):** same as takeover, with the target agent chosen by the supervisor and
+  `assigned_by` set to the supervisor.
+- **Resolve:** `status = RESOLVED`, `resolved_at = now`, and release the agent.
+  A scheduled job moves idle `RESOLVED` conversations to `CLOSED` (`closed_at`) after N days.
 
 ### 5.6 Read and unread (`conversation.read`)
 
-Upsert `conversation_reads(user, conversation, now)`. Reset the shared `unread_count` only
-when the owner reads the conversation.
+Upsert `conversation_reads` for `(conversation, reader_type, reader_id)` with `last_read_message_id`,
+`last_read_sequence_number`, `last_read_at` and `marked_unread = false`. "Mark as unread" sets `marked_unread = true`.
+Each reader has their own position, so unread is per agent.
 
 ### 5.7 Other events
 
 - **Typing:** a short-lived Redis key with a TTL plus a pub/sub event, so every server instance relays it;
   no database writes.
-- **`callback.request`:** create a `CALLBACK` notification for the owner (or the queue if
-  unassigned) and an `activities` entry.
-- **Internal notes:** messages with `type = NOTE` are never delivered to the customer;
-  filter them in the delivery step.
+- **`callback.request`:** insert a `callback_requests` row, notify the owner (or the queue if
+  unassigned) and write a `conversation_activities` row.
+- **Internal notes:** stored in `internal_notes`, never in `messages`, so they cannot be delivered to a
+  customer; mentions go to `note_mentions` and create notifications.
 
 ## 6. Permission matrix
 
@@ -189,8 +198,9 @@ The current protocol cannot express several cases. Add:
   `typing:start`, `typing:stop`, `conversation:assigned`; the protocol uses dotted names (`message.ack`, ...).
   Pick one naming scheme and change protocol, gateway, frontend and mock together.
 - REST paths in the PDF are under `/api/v1`; the backend mounts under `/api`. Decide before building endpoints.
-- The DTO `id` is currently the conversation slug (e.g. `maya`); the server maps slug to
-  the uuid primary key.
+- The DTO `id` is currently the conversation slug (e.g. `maya`), but `conversations` has no `slug` column (ids are
+  integers). Either add a `slug` column or change the protocol to use the numeric id (as a string, since Prisma
+  returns `bigint`).
 
 ## 8. Differences from the current mock server
 
@@ -198,8 +208,8 @@ The current protocol cannot express several cases. Add:
 | ---------------------------------------------- | -------------------------------------------------------------- |
 | Broadcasts every event to every socket         | Per-socket visibility rules                                    |
 | No authentication; agent hardcoded             | Backend 1 token verified on connect; real agent from the token |
-| `message.ack` reuses `clientId` as the id      | Real uuid plus `clientId` mapping                              |
-| `conversation.read` clears unread for everyone | Per-user read state; shared badge cleared by the owner         |
+| `message.ack` reuses `clientId` as the id      | Real integer id plus `clientId` mapping                        |
+| `conversation.read` clears unread for everyone | Per-reader position in `conversation_reads`                    |
 | No errors, no conflict check on takeover       | Conditional update and error events                            |
 | Nothing persisted                              | PostgreSQL via Prisma                                          |
 
