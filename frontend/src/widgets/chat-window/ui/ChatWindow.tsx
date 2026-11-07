@@ -1,9 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useConversationStore, useSelectedConversation } from "@/entities/conversation";
-import { MessageBubble, TypingBubble, useConversationMessages, useMessageStore } from "@/entities/message";
+import {
+  MessageBubble,
+  TypingBubble,
+  useConversationMessages,
+  useHasOlderMessages,
+  useMessageStore,
+} from "@/entities/message";
 import { ChatSearchBar, filterByQuery, useChatSearchStore } from "@/features/search-in-chat";
 import { MessageComposer, retryMessage, useComposerStore } from "@/features/send-message";
-import { assets } from "@/shared/config";
+import { loadOlderMessages } from "@/features/select-conversation";
+import { assets, features, isChatBackend } from "@/shared/config";
 import { AssetIcon, IconButton, notify, Icon } from "@/shared/ui";
 import { useCustomerCallStore } from "@/features/customer-call";
 import HandoffCard from "./HandoffCard";
@@ -11,7 +18,7 @@ import HandoffCard from "./HandoffCard";
 const PRESENCE = {
   "needs-human": "active • awaiting human response",
   ai: "active • handled by AI assistant",
-  assigned: "active • handled by you",
+  assigned: "active • handling",
 } as const;
 
 export default function ChatWindow({
@@ -23,11 +30,14 @@ export default function ChatWindow({
 }) {
   const conversation = useSelectedConversation();
   const messages = useConversationMessages(conversation?.id ?? null);
+  const hasOlder = useHasOlderMessages(conversation?.id ?? null);
   const typing = useMessageStore((state) => (conversation ? state.typing[conversation.id] : undefined));
   const { query, toggle } = useChatSearchStore();
   const setDraft = useComposerStore((state) => state.setDraft);
   const [showMore, setShowMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const topSentinelRef = useRef<HTMLDivElement>(null);
   const actionsRef = useRef<HTMLDivElement>(null);
 
   const trimmedQuery = query.trim();
@@ -37,6 +47,28 @@ export default function ChatWindow({
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [visible.length, typing, conversation?.id]);
+
+  // "Load older" triggered by an IntersectionObserver on the top sentinel
+  const handleLoadOlder = useCallback(async () => {
+    if (!conversation || loadingOlder || !hasOlder) return;
+    setLoadingOlder(true);
+    try {
+      await loadOlderMessages(conversation.id);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [conversation, loadingOlder, hasOlder]);
+
+  useEffect(() => {
+    if (!isChatBackend || !topSentinelRef.current) return;
+    const sentinel = topSentinelRef.current;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting) void handleLoadOlder(); },
+      { threshold: 1 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [handleLoadOlder]);
 
   useEffect(() => {
     if (!showMore) return;
@@ -70,7 +102,7 @@ export default function ChatWindow({
     <section className="active-chat">
       <header className="chat-header">
         <div className="chat-identity">
-          <img src={conversation.avatar} alt="" />
+          <img src={conversation.avatar || undefined} alt="" />
           <div>
             <div className="identity-line">
               <h2>{conversation.name}</h2>
@@ -121,8 +153,19 @@ export default function ChatWindow({
 
       <ChatSearchBar />
       <div className="chat-stream" aria-live="polite">
+        {/* Sentinel: when visible, load the next older page */}
+        {isChatBackend && <div ref={topSentinelRef} />}
+        {isChatBackend && hasOlder && (
+          <div className="load-older">
+            {loadingOlder ? (
+              <span>Loading…</span>
+            ) : (
+              <button type="button" onClick={handleLoadOlder}>Load older messages</button>
+            )}
+          </div>
+        )}
         <div className="today-pill">Today</div>
-        {hasQuery && visible.length === 0 && <div className="empty-search">No messages match “{trimmedQuery}”</div>}
+        {hasQuery && visible.length === 0 && <div className="empty-search">No messages match "{trimmedQuery}"</div>}
         {visible.map((message) => (
           <MessageBubble
             key={message.id}
@@ -142,13 +185,14 @@ export default function ChatWindow({
             onRegenerateDraft={() =>
               setDraft(
                 conversation.id,
-                `Hi ${firstName}, I’m reviewing your request and will confirm the updated schedule shortly.`,
+                `Hi ${firstName}, I'm reviewing your request and will confirm the updated schedule shortly.`,
               )
             }
           />
         )}
-        {conversation.handoff === "assigned" && (
-          <div className="takeover-confirmation">You’re now handling this conversation.</div>
+        {/* "You're handling" badge is step-2 UX — hidden in step 1 */}
+        {features.step2 && conversation.handoff === "assigned" && (
+          <div className="takeover-confirmation">You're now handling this conversation.</div>
         )}
         <MessageComposer conversationId={conversation.id} />
       </div>

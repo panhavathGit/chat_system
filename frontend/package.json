@@ -1,5 +1,5 @@
 {
-  "name": "@chat-dashboard/frontend",
+  "name": "@chat-system/frontend",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -10,7 +10,7 @@
     "format": "prettier --write src scripts",
     "lint": "oxlint",
     "typecheck": "tsc --noEmit",
-    "check:fsd": "node scripts/check-fsd-boundaries.mjs",
+    "check:fsd": "steiger ./src && node scripts/check-fsd-boundaries.mjs",
     "test": "vitest run",
     "lint:fix": "oxlint --fix",
     "format:check": "prettier --check src scripts"
@@ -19,18 +19,22 @@
     "@iconify-react/material-symbols": "^1.0.32",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "socket.io-client": "^4.8.4",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@feature-sliced/steiger-plugin": "^0.8.2",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.0",
     "oxlint": "^1.87.0",
+    "steiger": "^0.9.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
     "vite": "^8.0.5",
     "vitest": "^5.0.3"
-  }
+  },
+  "packageManager": "pnpm@10.34.3+sha512.f2c531b08829d7be7f03c90addc266615f9c5477463e4bf1d275cb263ce9ea57cf0d5599110d94649a9bb3fed9f0b5efcea74a7016b61532a24cb9ad87860c1d"
 }

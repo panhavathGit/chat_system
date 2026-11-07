@@ -5,6 +5,14 @@ export type ActivityTone = "blue" | "cyan" | "red";
 export type FileKind = "document" | "image";
 export type NotificationType = "new-conversation" | "handoff" | "callback" | "mention" | "system";
 
+export type AttachmentDto = {
+  id: string;
+  mimeType: string;
+  sizeBytes: number;
+  fileName: string;
+  durationSec: number | null;
+};
+
 /// Application lifecycle status (consolidates ApplicationStatus from
 /// ApplicationsTable.tsx and the status string on ConversationDto.application).
 export type ApplicationStatus = "New" | "Reviewing" | "Completed" | "Failed" | "Paid Off" | "in progress" | "overdue";
@@ -17,6 +25,12 @@ export type ChatMessageDto = {
   createdAt: string;
   status?: DeliveryStatus;
   senderId?: string;
+  /** Echoed back by chat_backend so the client can deduplicate the socket echo against its optimistic message. */
+  clientMessageId?: string;
+  /** Display name of the agent who sent the message (chat_backend only). */
+  senderName?: string;
+  /** File/image/voice attachment, present when type !== TEXT. */
+  attachment?: AttachmentDto | null;
 };
 
 export type ActivityDto = {

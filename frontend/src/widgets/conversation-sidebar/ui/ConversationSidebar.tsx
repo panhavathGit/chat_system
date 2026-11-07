@@ -1,8 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { ConversationItem, useConversationStore } from "@/entities/conversation";
-import { selectConversation } from "@/features/select-conversation";
+import { selectConversation, loadMoreInbox } from "@/features/select-conversation";
 import { useMessageSettingsStore } from "@/features/message-settings";
-import { assets } from "@/shared/config";
+import { assets, isChatBackend } from "@/shared/config";
 import { AssetIcon, IconPill } from "@/shared/ui";
 
 type Props = { open: boolean; onClose: () => void; onExpand: () => void };
@@ -13,7 +13,17 @@ export default function ConversationSidebar({ open, onClose, onExpand }: Props) 
   const selectedId = useConversationStore((state) => state.selectedId);
   const query = useConversationStore((state) => state.query);
   const setQuery = useConversationStore((state) => state.setQuery);
+  const inboxPage = useConversationStore((state) => state.inboxPage);
+  const inboxTotalPages = useConversationStore((state) => state.inboxTotalPages);
   const openSettings = useMessageSettingsStore((state) => state.setOpen);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const hasMoreInbox = isChatBackend && inboxTotalPages !== null && inboxPage < inboxTotalPages;
+
+  const handleLoadMore = () => {
+    setLoadingMore(true);
+    loadMoreInbox().finally(() => setLoadingMore(false));
+  };
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return order
@@ -61,6 +71,11 @@ export default function ConversationSidebar({ open, onClose, onExpand }: Props) 
             }}
           />
         ))}
+        {hasMoreInbox && (
+          <button className="load-more-inbox" onClick={handleLoadMore} disabled={loadingMore}>
+            {loadingMore ? "Loading…" : "Load more"}
+          </button>
+        )}
       </div>
     </aside>
   );

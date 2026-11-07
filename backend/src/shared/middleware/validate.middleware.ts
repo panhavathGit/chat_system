@@ -1,22 +1,28 @@
-import type { RequestHandler } from "express";
-import type { ZodType } from "zod";
-import { BadRequestError } from "@shared/errors/AppError.js";
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { BadRequestError } from '@shared/errors/AppError.js';
 
-type Schemas = { body?: ZodType; query?: ZodType; params?: ZodType };
+interface ValidationSchemas {
+  body?: z.ZodType;
+  query?: z.ZodType;
+  params?: z.ZodType;
+}
 
-export function validate(schemas: Schemas): RequestHandler {
-  return (req, _res, next) => {
-    for (const key of ["params", "query", "body"] as const) {
+export const validate =
+  (schemas: ValidationSchemas): RequestHandler =>
+  (req, _res, next) => {
+    for (const key of ['body', 'query', 'params'] as const) {
       const schema = schemas[key];
       if (!schema) continue;
+
       const result = schema.safeParse(req[key]);
       if (!result.success) {
-        next(new BadRequestError("Validation failed", result.error.issues));
-        return;
+        throw new BadRequestError(`Invalid request ${key}`, z.flattenError(result.error).fieldErrors);
       }
-      // Express 5 makes req.query a getter, so replace it instead of assigning.
-      Object.defineProperty(req, key, { value: result.data, writable: true, configurable: true, enumerable: true });
+
+      // * Express 5 exposes req.query as a getter, so it can't be reassigned directly
+      Object.defineProperty(req, key, { value: result.data, writable: true, enumerable: true });
     }
+
     next();
   };
-}

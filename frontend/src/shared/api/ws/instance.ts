@@ -1,11 +1,10 @@
 import { WsClient, type WebSocketLike } from "./client";
 import { MockSocket, dropMockConnections } from "./mock/socket";
 
-const url = import.meta.env.VITE_WS_URL;
+/** True when VITE_TRANSPORT is not "chat-backend". Keeps the mock path working for offline UI work. */
+export const isMockTransport = import.meta.env.VITE_TRANSPORT !== "chat-backend";
 
-export const isMockTransport = !url;
-
-export const wsClient = new WsClient(() => (url ? (new WebSocket(url) as WebSocketLike) : new MockSocket()));
+export const wsClient = new WsClient(() => (isMockTransport ? new MockSocket() : (new WebSocket("") as WebSocketLike)));
 
 /** Only meaningful with the mock transport. */
 export const simulateDisconnect = () => dropMockConnections();

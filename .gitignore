@@ -22,9 +22,14 @@ logs/
 .DS_Store
 
 # Generated Prisma client (prisma generate)
-/backend/prisma/generated/
+/backend/generated/
+
+# Backend dev RSA keys (scripts/dev-keys.ts) and uploaded chat attachments: never commit
+/backend/keys/
+/backend/uploads/
 
 !backend/.env.example
+!frontend/.env.example
 
 coverage/
 

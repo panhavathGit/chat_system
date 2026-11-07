@@ -1,4 +1,4 @@
-import type { ApplicationStatus as ProtocolApplicationStatus } from "@/shared/api/ws";
+import type { ApplicationStatus as ProtocolApplicationStatus } from "@/shared/api";
 import { assets } from "@/shared/config";
 import { AssetIcon, IconButton, notify, Icon } from "@/shared/ui";
 

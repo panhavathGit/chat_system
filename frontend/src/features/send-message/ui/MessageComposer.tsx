@@ -1,5 +1,6 @@
-import { useRef, type FormEvent } from "react";
-import { assets } from "@/shared/config";
+import { useRef, useCallback, type FormEvent } from "react";
+import { assets, isChatBackend } from "@/shared/config";
+import { chatSocket } from "@/shared/api";
 import { AssetIcon, notify } from "@/shared/ui";
 import { sendMessage, useAttachment, useComposerStore, useDraft } from "../model/store";
 
@@ -8,9 +9,37 @@ export default function MessageComposer({ conversationId }: { conversationId: st
   const attachment = useAttachment(conversationId);
   const { recording, setDraft, setAttachment, toggleRecording } = useComposerStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const emitTyping = useCallback(
+    (isTyping: boolean) => {
+      if (!isChatBackend) return;
+      chatSocket.emit("typing", { conversationId, isTyping });
+    },
+    [conversationId],
+  );
+
+  const handleDraftChange = (value: string) => {
+    setDraft(conversationId, value);
+    if (!isChatBackend) return;
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+    } else {
+      emitTyping(true);
+    }
+    typingTimerRef.current = setTimeout(() => {
+      typingTimerRef.current = null;
+      emitTyping(false);
+    }, 2000);
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
+    emitTyping(false);
     if (sendMessage(conversationId, draft)) notify("Message sent");
   };
 
@@ -18,7 +47,7 @@ export default function MessageComposer({ conversationId }: { conversationId: st
     <form className="prompt-input" onSubmit={submit}>
       <textarea
         value={draft}
-        onChange={(event) => setDraft(conversationId, event.target.value)}
+        onChange={(event) => handleDraftChange(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) submit(event);
         }}

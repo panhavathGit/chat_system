@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ConversationDto } from "@/shared/api/ws";
+import type { ConversationDto } from "@/shared/api";
 
 export type Conversation = ConversationDto & { archived?: boolean };
 
@@ -8,7 +8,13 @@ type ConversationState = {
   order: string[];
   selectedId: string | null;
   query: string;
+  /** Current page loaded from the inbox REST endpoint (1-based). */
+  inboxPage: number;
+  /** Total pages available from the last inbox fetch. null = unknown. */
+  inboxTotalPages: number | null;
   setAll: (conversations: Conversation[]) => void;
+  appendInboxPage: (conversations: Conversation[], page: number, totalPages: number) => void;
+  setInboxMeta: (page: number, totalPages: number) => void;
   upsert: (conversation: Conversation) => void;
   select: (id: string) => void;
   setQuery: (query: string) => void;
@@ -23,6 +29,8 @@ export const useConversationStore = create<ConversationState>((set) => ({
   order: [],
   selectedId: null,
   query: "",
+  inboxPage: 1,
+  inboxTotalPages: null,
   setAll: (conversations) =>
     set((state) => {
       const stillExists = conversations.some(({ id }) => id === state.selectedId);
@@ -33,6 +41,18 @@ export const useConversationStore = create<ConversationState>((set) => ({
         selectedId: stillExists ? state.selectedId : (conversations[0]?.id ?? null),
       };
     }),
+  appendInboxPage: (conversations, page, totalPages) =>
+    set((state) => {
+      const incoming = Object.fromEntries(conversations.map((c) => [c.id, c]));
+      const newIds = conversations.map(({ id }) => id).filter((id) => !state.order.includes(id));
+      return {
+        byId: { ...state.byId, ...incoming },
+        order: [...state.order, ...newIds],
+        inboxPage: page,
+        inboxTotalPages: totalPages,
+      };
+    }),
+  setInboxMeta: (page, totalPages) => set({ inboxPage: page, inboxTotalPages: totalPages }),
   upsert: (conversation) =>
     set((state) => {
       const previous = state.byId[conversation.id];

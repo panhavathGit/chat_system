@@ -1,4 +1,4 @@
-import { wsClient } from "@/shared/api/ws";
+import { wsClient } from "@/shared/api";
 import { assets } from "@/shared/config";
 import { AssetIcon } from "@/shared/ui";
 

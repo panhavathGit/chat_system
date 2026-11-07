@@ -1,8 +1,8 @@
 export class AppError extends Error {
   constructor(
-    public readonly status: number,
-    public readonly code: string,
     message: string,
+    public readonly statusCode: number,
+    public readonly code: string,
     public readonly details?: unknown,
   ) {
     super(message);
@@ -11,43 +11,43 @@ export class AppError extends Error {
 }
 
 export class BadRequestError extends AppError {
-  constructor(message = "Bad request", details?: unknown) {
-    super(400, "BAD_REQUEST", message, details);
+  constructor(message = 'Bad request', details?: unknown) {
+    super(message, 400, 'BAD_REQUEST', details);
   }
 }
 
 export class UnauthorizedError extends AppError {
-  constructor(message = "Unauthorized", details?: unknown) {
-    super(401, "UNAUTHORIZED", message, details);
+  constructor(message = 'Unauthorized', details?: unknown) {
+    super(message, 401, 'UNAUTHORIZED', details);
   }
 }
 
 export class ForbiddenError extends AppError {
-  constructor(message = "Forbidden", details?: unknown) {
-    super(403, "FORBIDDEN", message, details);
+  constructor(message = 'Forbidden', details?: unknown) {
+    super(message, 403, 'FORBIDDEN', details);
   }
 }
 
 export class NotFoundError extends AppError {
-  constructor(message = "Not found", details?: unknown) {
-    super(404, "NOT_FOUND", message, details);
+  constructor(message = 'Not found', details?: unknown) {
+    super(message, 404, 'NOT_FOUND', details);
   }
 }
 
 export class ConflictError extends AppError {
-  constructor(message = "Conflict", details?: unknown) {
-    super(409, "CONFLICT", message, details);
+  constructor(message = 'Conflict', details?: unknown) {
+    super(message, 409, 'CONFLICT', details);
   }
 }
 
-export class TooManyRequestsError extends AppError {
-  constructor(message = "Too many requests", details?: unknown) {
-    super(429, "RATE_LIMIT_EXCEEDED", message, details);
+export class PayloadTooLargeError extends AppError {
+  constructor(message = 'Payload too large', details?: unknown) {
+    super(message, 413, 'PAYLOAD_TOO_LARGE', details);
   }
 }
 
-export class ServiceUnavailableError extends AppError {
-  constructor(message = "Service unavailable", details?: unknown) {
-    super(503, "SERVICE_UNAVAILABLE", message, details);
+export class UnsupportedMediaTypeError extends AppError {
+  constructor(message = 'Unsupported media type', details?: unknown) {
+    super(message, 415, 'UNSUPPORTED_MEDIA_TYPE', details);
   }
 }

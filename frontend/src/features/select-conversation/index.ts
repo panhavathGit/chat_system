@@ -1,1 +1,1 @@
-export { selectConversation } from "./model/selectConversation";
+export { selectConversation, loadOlderMessages, loadMoreInbox } from "./model/selectConversation";
