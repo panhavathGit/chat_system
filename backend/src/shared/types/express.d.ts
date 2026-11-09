@@ -4,7 +4,7 @@ declare global {
     interface User {
       id: string; // * ChatUser.id (ours), not the LOS id
       losUserId: number;
-      kind: 'customer' | 'staff';
+      type: 'customer' | 'staff';
       username: string;
     }
 

@@ -1,6 +1,6 @@
 /** Raw shapes returned by chat_backend (agent namespace). */
 
-export type CbSenderKind = "CUSTOMER" | "STAFF";
+export type CbUserType = "CUSTOMER" | "STAFF";
 
 export type CbAttachment = {
   id: string;
@@ -13,13 +13,12 @@ export type CbAttachment = {
 export type CbSender = {
   id: string;
   username: string;
-  kind: CbSenderKind;
+  type: CbUserType;
 };
 
 export type CbMessage = {
   id: string;
   conversationId: string;
-  senderKind: CbSenderKind;
   type: "TEXT" | "VOICE" | "IMAGE" | "FILE";
   text: string | null;
   clientMessageId: string;
@@ -46,7 +45,7 @@ export type CbConversation = {
 export type CbSessionUser = {
   id: string;
   losUserId: number;
-  kind: "staff";
+  type: "staff";
   username: string;
 };
 

@@ -84,9 +84,9 @@ const staffBSocket = await connect(staffB.accessToken);
 check('customer and two staff members connect', customer.connected && staffASocket.connected && staffBSocket.connected);
 
 // * Customer writes → every staff member receives it
-const atA = waitFor(staffASocket, 'message:new', (m: any) => m.senderKind === 'CUSTOMER');
-const atB = waitFor(staffBSocket, 'message:new', (m: any) => m.senderKind === 'CUSTOMER');
-const ownEcho = waitFor(customer, 'message:new', (m: any) => m.senderKind === 'CUSTOMER');
+const atA = waitFor(staffASocket, 'message:new', (m: any) => m.sender.type === 'CUSTOMER');
+const atB = waitFor(staffBSocket, 'message:new', (m: any) => m.sender.type === 'CUSTOMER');
+const ownEcho = waitFor(customer, 'message:new', (m: any) => m.sender.type === 'CUSTOMER');
 const sent = await api('/customer/api/v1/chat/conversation/messages', customerToken, {
   method: 'POST',
   body: { clientMessageId: randomUUID(), type: 'TEXT', text: 'Hello from the socket smoke test' },
@@ -104,8 +104,8 @@ customer.emit('typing', { isTyping: true });
 check('staff see the customer typing', !!(await staffSeesTyping));
 
 // * Any staff member replies → the customer and the other staff get it live
-const reply = waitFor(customer, 'message:new', (m: any) => m.senderKind === 'STAFF');
-const otherStaffSees = waitFor(staffASocket, 'message:new', (m: any) => m.senderKind === 'STAFF');
+const reply = waitFor(customer, 'message:new', (m: any) => m.sender.type === 'STAFF');
+const otherStaffSees = waitFor(staffASocket, 'message:new', (m: any) => m.sender.type === 'STAFF');
 await api(`/agent/api/v1/chat/conversations/${sent.conversationId}/messages`, staffB.accessToken, {
   method: 'POST',
   body: { clientMessageId: randomUUID(), type: 'TEXT', text: 'Hi, how can I help?' },

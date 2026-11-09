@@ -28,7 +28,6 @@ export class MessageService {
         {
           conversationId: conversation.id,
           senderId: user.id,
-          senderKind: user.kind === 'customer' ? 'CUSTOMER' : 'STAFF',
           type: input.type,
           text: input.text,
           attachmentId: input.attachmentId,

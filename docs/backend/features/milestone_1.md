@@ -27,7 +27,7 @@ Then:    every chat REST call and the socket use the chat session
 ```
 
 - Any LOS staff role may use chat; the role is stored in `chat_users.los_role` for display only.
-- Sessions use one audience per kind, so a customer session doesn't work on staff routes and vice versa.
+- Sessions use one audience per type, so a customer session doesn't work on staff routes and vice versa.
 
 ## Diagrams
 
@@ -90,7 +90,7 @@ erDiagram
   ROLE {
     int id PK
     string name "unique, mirrors LOS role name"
-    enum kind "CUSTOMER | STAFF"
+    string type "CUSTOMER | STAFF"
     string description
     datetime created_at
   }
@@ -108,9 +108,9 @@ erDiagram
   CHAT_USER {
     uuid id PK
     int los_user_id "LOS User.id"
-    enum kind "CUSTOMER | STAFF"
+    string type "CUSTOMER | STAFF"
     string username
-    int role_id FK "→ roles"
+    int role_id FK "(role_id, type) → roles"
     datetime last_seen_at
   }
   CONVERSATION {
@@ -123,8 +123,7 @@ erDiagram
     int seq "insert order"
     uuid conversation_id FK
     uuid sender_id FK
-    enum sender_kind "CUSTOMER | STAFF"
-    enum type "TEXT | VOICE | IMAGE | FILE"
+    string type "TEXT | VOICE | IMAGE | FILE"
     text text
     uuid attachment_id FK "unique"
     string client_message_id "unique per sender"
@@ -145,11 +144,13 @@ erDiagram
 
 All ids are UUIDs and times are `timestamptz`. Chat history is permanent, so every foreign key is `ON DELETE RESTRICT`.
 
-| Enum | Values |
-| :--- | :--- |
-| `chat_user_kind` | `CUSTOMER`, `STAFF` |
-| `sender_kind` | `CUSTOMER`, `STAFF` |
-| `message_type` | `TEXT`, `VOICE`, `IMAGE`, `FILE` |
+No database enums: these columns are `text`, the allowed values are defined in code (`backend/src/shared/types/chat-types.ts`), and CHECK constraints enforce them in the database.
+
+| Column | Values | Enforced by |
+| :--- | :--- | :--- |
+| `roles.type` | `CUSTOMER`, `STAFF` | `roles_type_check` |
+| `chat_users.type` | same as its role | FK `(role_id, type)` → `roles(id, type)` |
+| `messages.type` | `TEXT`, `VOICE`, `IMAGE`, `FILE` | `messages_type_check` |
 
 **`roles`**: known roles — mirrors LOS role names; seeded at migration time
 
@@ -157,7 +158,7 @@ All ids are UUIDs and times are `timestamptz`. Chat history is permanent, so eve
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | int | no | PK, autoincrement | |
 | `name` | varchar | no | unique | mirrors LOS role name exactly (e.g. `CREDIT_ASSESSMENT`) |
-| `kind` | chat_user_kind | no | | `CUSTOMER` or `STAFF` |
+| `type` | text | no | | `CUSTOMER` or `STAFF` |
 | `description` | varchar | yes | | |
 | `created_at` | timestamptz | no | | |
 
@@ -183,10 +184,10 @@ All ids are UUIDs and times are `timestamptz`. Chat history is permanent, so eve
 | Column | Type | Null | Key / constraint | Notes |
 | :--- | :--- | :--- | :--- | :--- |
 | `id` | uuid | no | PK | |
-| `los_user_id` | int | no | unique with `kind` | `userId` from the LOS token |
-| `kind` | chat_user_kind | no | unique with `los_user_id` | |
+| `los_user_id` | int | no | unique with `type` | `userId` from the LOS token |
+| `type` | text | no | unique with `los_user_id` | |
 | `username` | varchar | no | | copied from the token, refreshed on each sign-in |
-| `role_id` | int | no | FK → `roles.id` | resolved and validated at session exchange time |
+| `role_id` | int | no | FK `(role_id, type)` → `roles(id, type)`, so `type` always matches the role | resolved and validated at session exchange time |
 | `last_seen_at` | timestamptz | no | | |
 | `created_at` / `updated_at` | timestamptz | no | | |
 
@@ -207,8 +208,7 @@ All ids are UUIDs and times are `timestamptz`. Chat history is permanent, so eve
 | `seq` | int | no | unique, auto-increment | insert order; history is sorted by it |
 | `conversation_id` | uuid | no | FK → `conversations.id`, index with `seq` | |
 | `sender_id` | uuid | no | FK → `chat_users.id` | the customer or a staff member |
-| `sender_kind` | sender_kind | no | | |
-| `type` | message_type | no | | |
+| `type` | text | no | | |
 | `text` | text | yes | | required for TEXT; optional caption on files |
 | `attachment_id` | uuid | yes | FK → `attachments.id`, **unique** | required for VOICE, IMAGE and FILE |
 | `client_message_id` | varchar | yes | unique with `sender_id` | made by the app; a retried send returns the original |
@@ -276,3 +276,7 @@ Socket.io (same chat session token): `message:new` goes to the customer's room a
 - **2026-11-06:**
   - **Auth v2:** customers exchange the LOS token once for a chat session.
   - **Tickets removed:** migration `20261106090000_remove_tickets` dropped `tickets`, `ticket_events`, `messages.ticket_id`, `chat_users.staff_role` and the ticket SYSTEM messages.
+- **2026-11-09:**
+  - **Refresh tokens:** migration `20261109090000_refresh_tokens` added `refresh_tokens` (rotation, reuse detection, 24 h absolute limit) and `/auth/refresh`, `/auth/logout`.
+  - **"kind" renamed to "type":** migration `20261109100000_user_type_from_roles` renamed `chat_user_kind` → `chat_user_type` and `roles.kind` / `chat_users.kind` → `type`, tied `chat_users.type` to its role with the FK `(role_id, type) → roles(id, type)`, and dropped `messages.sender_kind` (use `sender.type`). API: `kind` → `type`, `senderKind` removed.
+  - **No database enums:** migration `20261109110000_drop_db_enums` turned `roles.type`, `chat_users.type` and `messages.type` into `text` and dropped the `chat_user_type` and `message_type` types. Allowed values live in `backend/src/shared/types/chat-types.ts`; `roles_type_check` and `messages_type_check` enforce them. API unchanged.

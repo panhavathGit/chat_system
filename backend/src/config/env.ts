@@ -38,6 +38,8 @@ const envSchema = z
     CHAT_SESSION_SECRET: z.string().min(32, 'CHAT_SESSION_SECRET must be at least 32 characters'),
     CHAT_CUSTOMER_SESSION_EXPIRES_IN: duration.default('1h'),
     CHAT_STAFF_SESSION_EXPIRES_IN: duration.default('15m'),
+    // * Absolute max age of a login (both types); refreshing rotates the token but never extends this
+    CHAT_REFRESH_EXPIRES_IN: duration.default('24h'),
 
     UPLOAD_DIR: z.string().default('uploads'),
     UPLOAD_MAX_BYTES: z.coerce

@@ -17,7 +17,7 @@ export class ChatSocketHandlers {
     io.on('connection', this.onConnection);
   }
 
-  // * Same as REST: a chat session token of either kind; LOS tokens are only accepted by /auth/session
+  // * Same as REST: a chat session token of either type; LOS tokens are only accepted by /auth/session
   // * The Authorization header is a fallback for clients that can't set auth (e.g. Postman); browsers use auth.token
   private authenticate = async (socket: Socket, next: (err?: Error) => void) => {
     const header = socket.handshake.headers.authorization;
@@ -37,7 +37,7 @@ export class ChatSocketHandlers {
   private onConnection = (socket: Socket) => {
     const user = userOf(socket);
     void socket.join(rooms.user(user.id));
-    if (user.kind === 'staff') void socket.join(rooms.staff);
+    if (user.type === 'staff') void socket.join(rooms.staff);
 
     socket.on('typing', (payload: unknown) => {
       this.relayTyping(socket, payload).catch((err: unknown) =>
@@ -51,7 +51,7 @@ export class ChatSocketHandlers {
     const user = userOf(socket);
     const isTyping = (payload as { isTyping?: unknown } | null)?.isTyping !== false;
 
-    if (user.kind === 'customer') {
+    if (user.type === 'customer') {
       const conversation = await this.conversationRepository.findByCustomer(user.id);
       if (!conversation) return;
       socket.to(rooms.staff).emit('typing', { conversationId: conversation.id, user: this.summary(user), isTyping });
@@ -68,6 +68,6 @@ export class ChatSocketHandlers {
   }
 
   private summary(user: Express.User) {
-    return { id: user.id, username: user.username, kind: user.kind };
+    return { id: user.id, username: user.username, type: user.type };
   }
 }

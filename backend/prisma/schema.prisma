@@ -10,40 +10,25 @@ datasource db {
   provider = "postgresql"
 }
 
-enum ChatUserKind {
-  CUSTOMER
-  STAFF
-
-  @@map("chat_user_kind")
-}
-
-enum SenderKind {
-  CUSTOMER
-  STAFF
-
-  @@map("sender_kind")
-}
-
-enum MessageType {
-  TEXT
-  VOICE
-  IMAGE
-  FILE
-
-  @@map("message_type")
-}
+// * No database enums: allowed values live in src/shared/types/chat-types.ts and are enforced by
+// * CHECK constraints written in the migrations (Prisma can't express CHECK, so they aren't shown here):
+// *   roles.type     IN ('CUSTOMER', 'STAFF')            (chat_users.type is FK-tied to it)
+// *   messages.type  IN ('TEXT', 'VOICE', 'IMAGE', 'FILE')
 
 // Known roles — mirrors LOS role names; seeded at migration time, not managed via CRUD
 model Role {
   id          Int              @id @default(autoincrement())
   name        String           @unique
-  kind        ChatUserKind
+  // * CUSTOMER | STAFF: the source of truth for a user's type
+  type        String
   description String?
   createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
 
   chatUsers   ChatUser[]
   permissions RolePermission[]
 
+  // * Target of chat_users' (role_id, type) foreign key
+  @@unique([id, type])
   @@map("roles")
 }
 
@@ -77,20 +62,45 @@ model RolePermission {
 model ChatUser {
   id         String       @id @default(uuid()) @db.Uuid
   losUserId  Int          @map("los_user_id")
-  kind       ChatUserKind
+  // * Copy of role.type, kept because LOS customers and staff are separate ID spaces (unique key below);
+  // * the (role_id, type) foreign key makes the database reject a type that disagrees with the role
+  type       String
   username   String
   roleId     Int          @map("role_id")
-  role       Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  role       Role         @relation(fields: [roleId, type], references: [id, type], onDelete: Restrict)
   lastSeenAt DateTime     @default(now()) @map("last_seen_at") @db.Timestamptz(3)
   createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  conversation Conversation?
-  messages     Message[]
-  attachments  Attachment[]
+  conversation  Conversation?
+  messages      Message[]
+  attachments   Attachment[]
+  refreshTokens RefreshToken[]
 
-  @@unique([losUserId, kind])
+  @@unique([losUserId, type])
   @@map("chat_users")
+}
+
+// One row per issued refresh token; a login starts a family and every refresh rotates within it
+model RefreshToken {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  user         ChatUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // * Reusing an already-rotated token revokes the whole family (likely theft)
+  familyId     String    @map("family_id") @db.Uuid
+  // * SHA-256 of the raw token; the raw value is only ever held by the client
+  tokenHash    String    @unique @map("token_hash")
+  // * Absolute: copied unchanged on rotation, so refreshing never extends a login past its max age
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
+  replacedById String?   @unique @map("replaced_by_id") @db.Uuid
+  userAgent    String?   @map("user_agent")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
 // One permanent thread per customer; every staff member can read and reply to it
@@ -115,8 +125,8 @@ model Message {
   conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
   senderId        String       @map("sender_id") @db.Uuid
   sender          ChatUser     @relation(fields: [senderId], references: [id], onDelete: Restrict)
-  senderKind      SenderKind   @map("sender_kind")
-  type            MessageType
+  // * TEXT | VOICE | IMAGE | FILE
+  type            String
   text            String?
   attachmentId    String?      @unique @map("attachment_id") @db.Uuid
   attachment      Attachment?  @relation(fields: [attachmentId], references: [id], onDelete: Restrict)

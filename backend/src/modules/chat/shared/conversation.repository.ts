@@ -1,6 +1,7 @@
 import type { DatabaseClient, DbClient } from '@config/database.js';
+import type { MessageType } from '@shared/types/chat-types.js';
 
-const userSummarySelect = { id: true, username: true, kind: true } as const;
+const userSummarySelect = { id: true, username: true, type: true } as const;
 
 export const attachmentSummarySelect = {
   id: true,
@@ -14,7 +15,6 @@ export const attachmentSummarySelect = {
 export const messageSelect = {
   id: true,
   conversationId: true,
-  senderKind: true,
   type: true,
   text: true,
   clientMessageId: true,
@@ -108,8 +108,7 @@ export class ConversationRepository {
     data: {
       conversationId: string;
       senderId: string;
-      senderKind: 'CUSTOMER' | 'STAFF';
-      type: 'TEXT' | 'VOICE' | 'IMAGE' | 'FILE';
+      type: MessageType;
       text?: string | null | undefined;
       attachmentId?: string | null | undefined;
       clientMessageId: string;
@@ -120,7 +119,6 @@ export class ConversationRepository {
       data: {
         conversationId: data.conversationId,
         senderId: data.senderId,
-        senderKind: data.senderKind,
         type: data.type,
         text: data.text ?? null,
         attachmentId: data.attachmentId ?? null,

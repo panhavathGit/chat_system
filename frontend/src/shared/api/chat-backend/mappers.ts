@@ -50,7 +50,7 @@ export function mapMessage(msg: CbMessage): ChatMessageDto {
   return {
     id: msg.id,
     conversationId: msg.conversationId,
-    side: msg.senderKind === "CUSTOMER" ? "customer" : "agent",
+    side: msg.sender.type === "CUSTOMER" ? "customer" : "agent",
     text: msg.text ?? "",
     createdAt: msg.createdAt,
     status: "sent",

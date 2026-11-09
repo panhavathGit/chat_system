@@ -207,10 +207,11 @@ function startRealtimeChatBackend() {
   offs.push(
     chatSocket.on<{
       conversationId: string;
-      user: { id: string; username: string; kind: string };
+      // * Socket payloads carry the session user: type is lowercase here, unlike message sender.type
+      user: { id: string; username: string; type: "customer" | "staff" };
       isTyping: boolean;
     }>("typing", ({ conversationId, user, isTyping }) => {
-      if (user.kind !== "CUSTOMER") return;
+      if (user.type !== "customer") return;
       const wasTyping = useMessageStore.getState().typing[conversationId] === "customer";
       useMessageStore.getState().setTyping(conversationId, "customer", isTyping);
       if (

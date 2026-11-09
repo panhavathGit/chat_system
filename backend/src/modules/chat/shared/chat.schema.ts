@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { MESSAGE_TYPES } from '@shared/types/chat-types.js';
 
 export const sendMessageSchema = z
   .object({
     // * Made by the client per message; a retry with the same value returns the original instead of a duplicate
     clientMessageId: z.string().trim().min(1).max(64),
-    type: z.enum(['TEXT', 'VOICE', 'IMAGE', 'FILE']),
+    type: z.enum(MESSAGE_TYPES),
     text: z.string().trim().min(1).max(4000).optional(),
     attachmentId: z.uuid().optional(),
   })

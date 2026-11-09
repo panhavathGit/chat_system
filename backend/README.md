@@ -9,7 +9,9 @@ It serves two clients:
 
 `chat_backend` stores **no passwords**. Identity comes from `los_backend`: customers send their LOS access token, and staff swap an LOS handoff token for a short chat session. Both are verified with the LOS public key.
 
-This README covers **local development only**. Docker is not used: PostgreSQL runs locally via Homebrew, and DBeaver is used as the database GUI. The milestone-1 design (diagrams, tables, decisions) is in [docs/features/milestone_1.md](docs/features/milestone_1.md).
+This README covers **local development only**. Docker is not used: PostgreSQL runs locally via Homebrew, and DBeaver is used as the database GUI. The milestone-1 design (diagrams, tables, decisions) is in [docs/backend/features/milestone_1.md](../docs/backend/features/milestone_1.md).
+
+This package lives in the `chat-system` monorepo next to the staff frontend. The quick start for the whole repo is the [root README](../README.md); **every command below runs from `backend/`** unless it says otherwise.
 
 **Contents**
 
@@ -72,10 +74,10 @@ Then right-click **Databases** → **Refresh**.
 ### 3. Install dependencies
 
 ```bash
-pnpm install
+pnpm install     # from anywhere in the repo; installs both packages
 ```
 
-Prisma's install scripts are already approved in `pnpm-workspace.yaml`, so no `pnpm approve-builds` prompt is needed.
+Prisma's install scripts are already approved in the root `pnpm-workspace.yaml`, so no `pnpm approve-builds` prompt is needed.
 
 ### 4. Create a dev key pair (stands in for LOS)
 
@@ -116,7 +118,7 @@ curl http://localhost:3000/health
 pnpm run smoke:socket    # the real-time checks (needs the dev key from step 4)
 ```
 
-In DBeaver, refresh `chat_backend` → **Schemas → public → Tables**. You should see `chat_users`, `conversations`, `messages`, `attachments` and `_prisma_migrations`.
+In DBeaver, refresh `chat_backend` → **Schemas → public → Tables**. You should see `chat_users`, `conversations`, `messages`, `attachments`, `roles`, `permissions`, `role_permissions` and `_prisma_migrations`.
 
 ---
 
@@ -160,7 +162,9 @@ prisma/schema.prisma ┤
 
 | Table | What it holds |
 | :--- | :--- |
-| `chat_users` | Everyone who has used chat (customers and staff), keyed by `(los_user_id, kind)`. LOS owns the accounts. |
+| `chat_users` | Everyone who has used chat (customers and staff), keyed by `(los_user_id, type)`, with their `role_id`. LOS owns the accounts. |
+| `roles` | `CUSTOMER` plus the LOS staff roles, seeded by migration. Customers always get `CUSTOMER`; staff get the role from their handoff token, and unknown roles are rejected. |
+| `permissions`, `role_permissions` | What each role may do, seeded by migration. |
 | `conversations` | One permanent thread per customer; every staff member can read and reply to it. |
 | `messages` | Every message in a conversation, from the customer or any staff member. Ordered by `seq`. |
 | `attachments` | Uploaded files (voice, images, documents), uploaded first and then sent in a message. |
@@ -194,6 +198,7 @@ prisma/schema.prisma ┤
 | `20261105090000_chat_core` | Drops `users`/`posts`; creates the chat tables, enums and the one-open-ticket partial index |
 | `20261105100000_message_seq` | Adds `messages.seq` so messages written in one transaction keep their order |
 | `20261106090000_remove_tickets` | Drops `tickets`, `ticket_events`, `messages.ticket_id`, `chat_users.staff_role` and the ticket SYSTEM messages; every staff member now replies directly |
+| `20261106100000_add_roles_permissions` | Creates `roles`, `permissions`, `role_permissions`, seeds them, adds `chat_users.role_id` and backfills it |
 
 ### Useful commands
 
@@ -237,8 +242,8 @@ Staff (los_chat_web iframe inside los_web)
 ```
 
 - **Why the handoff for staff:** los_web's own LOS token works on all of LOS. The handoff token only starts a chat session, for 2 minutes, so the real staff token never leaves los_web.
-- **Session tokens:** HS256 with `CHAT_SESSION_SECRET`, with one audience per kind, so a customer session is rejected on staff routes and the other way round. They are stateless; clients exchange again when one expires.
-- **Needs an LOS change:** a `POST /api/v1/admin/chat/handoff-token` endpoint. The full spec for los_backend, los_web and the Flutter app is in [docs/features/auth/los-chat-handoff.md](docs/features/auth/los-chat-handoff.md).
+- **Session tokens:** HS256 with `CHAT_SESSION_SECRET`, with one audience per type, so a customer session is rejected on staff routes and the other way round. They are stateless; clients exchange again when one expires.
+- **Needs an LOS change:** a `POST /api/v1/admin/chat/handoff-token` endpoint. The full spec for los_backend, los_web and the Flutter app is in [docs/backend/features/auth/los-chat-handoff.md](../docs/backend/features/auth/los-chat-handoff.md).
 - **Not checked yet:** LOS logout or suspension (LOS tracks those in its own Redis). A revoked LOS token can still be exchanged until it expires.
 - **Code:** `src/config/los-keys.ts` (key loading), `src/modules/auth/auth.service.ts` (`exchangeCustomerToken`, `exchangeHandoff`, `verifySession`), `src/shared/middleware/auth.middleware.ts` (`authenticateCustomer`, `authenticateStaff`).
 
@@ -399,11 +404,10 @@ When the LOS team ships the chat handoff, set `LOS_HANDOFF_AUDIENCE=chat` and `L
 
 ## Project Structure
 
+Design docs live at the repo root in `docs/backend/`: [backend_project_guidelines.md](../docs/backend/backend_project_guidelines.md) (module rules and design decisions, read before contributing) and [features/milestone_1.md](../docs/backend/features/milestone_1.md) (diagrams, tables, decisions).
+
 ```
-.
-├── docs/
-│   ├── PROJECT_GUIDELINE_IMPROVEMENTS.md   # Module rules and design decisions — read before contributing
-│   └── features/milestone_1.md             # Milestone 1 design: diagrams, tables, decisions
+backend/
 ├── prisma/
 │   ├── schema.prisma                       # Database models
 │   └── migrations/                         # SQL migrations (committed)
@@ -424,6 +428,7 @@ When the LOS team ships the chat handoff, set `LOS_HANDOFF_AUDIENCE=chat` and `L
 │   │   └── types/express.d.ts              # Types req.user
 │   ├── modules/
 │   │   ├── auth/                           # LOS token verification, staff session exchange
+│   │   ├── role/                           # Role lookup (roles table)
 │   │   └── chat/
 │   │       ├── shared/                     # repositories, attachment service, events, shared schemas
 │   │       ├── customer-chat/              # /customer/api/v1/chat
@@ -465,7 +470,7 @@ Each module is layered **routes → controller → service → repository**:
 
 A module with two audiences (like `chat`) has a `shared/` folder for repositories plus one `<audience>-<module>/` folder per audience, each with its own `routes.ts`. Repository methods that take part in a transaction accept an optional `tx` (`DbClient`) argument; services start the transaction with the repository's `transaction()` method.
 
-See [docs/PROJECT_GUIDELINE_IMPROVEMENTS.md](docs/PROJECT_GUIDELINE_IMPROVEMENTS.md) for the rules and why.
+See [docs/backend/backend_project_guidelines.md](../docs/backend/backend_project_guidelines.md) for the rules and why.
 
 Conventions:
 

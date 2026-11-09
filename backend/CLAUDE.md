@@ -14,7 +14,10 @@ pnpm exec prisma generate                      # regenerate the client (migrate 
 pnpm run dev:keys       # dev RSA key pair standing in for LOS (keys/, git-ignored)
 pnpm run dev:token customer|handoff [--user N --name X --role R --expired --aud A --type T]
 pnpm run smoke:socket   # Socket.io end-to-end checks (server must be running)
+pnpm run openapi        # regenerate backend/openapi.json (commit it: other repos read it)
 ```
+
+API docs: Swagger UI at `http://localhost:3000/docs` and the spec at `/docs/openapi.json`, **outside production only** (`zod-openapi` and `swagger-ui-express` are dev dependencies, loaded by a dynamic import in `app.ts`). Covered so far: the auth module.
 
 - Use `pnpm exec <bin>` for local binaries. `pnpm dlx tsc` runs the wrong package.
 - `prisma`, `@prisma/client` and `@prisma/adapter-pg` are pinned to **7.10.1**. Don't upgrade (plain `pnpm add prisma` pulls the 8.x RC).
@@ -49,6 +52,7 @@ Each module is layered: **routes → controller → service → repository**.
 | `<name>.controller.ts` | `class XController { constructor(service) }`: reads `req`, calls the service, sends the response. |
 | `<name>.routes.ts` | The **composition root**: creates the instances and wires middleware → handler. |
 | `index.ts` | Exports only the routers, plus any instance outside code needs (e.g. `authService`, `authenticateCustomer`). |
+| `<name>.openapi.ts` | Optional, documentation only: exports `<name>OpenApiPaths` (zod-openapi). Request bodies reuse `<name>.schema.ts`; response schemas are written here with `.meta({ id })` and the helpers in `@shared/openapi/openapi.common.ts`. Mark public routes `security: []`. Spread it into `src/docs/openapi.ts`, imported directly (not via `index.ts`, which would start Prisma). Never imported by runtime code. |
 
 ### Dependency injection rules
 
@@ -77,14 +81,15 @@ const staffChatController = new StaffChatController(new StaffChatService(convers
 
 ## Auth
 
-"Sign in with LOS": LOS is the identity provider (it alone checks passwords); chat_backend verifies an LOS-signed token, maps the person to `chat_users` (find-or-create by `(los_user_id, kind)`), and issues **its own session**. LOS tokens are accepted **only** by the two `/auth/session` endpoints. Spec for the LOS team and the apps: [docs/backend/features/auth/los-chat-handoff.md](../docs/backend/features/auth/los-chat-handoff.md).
+"Sign in with LOS": LOS is the identity provider (it alone checks passwords); chat_backend verifies an LOS-signed token, maps the person to `chat_users` (find-or-create by `(los_user_id, type)`), and issues **its own session**. LOS tokens are accepted **only** by the two `/auth/session` endpoints. Spec for the LOS team and the apps: [docs/backend/features/auth/los-chat-handoff.md](../docs/backend/features/auth/los-chat-handoff.md).
 
 - **Customer:** `POST /customer/api/v1/auth/session { losToken }`. `exchangeCustomerToken` checks RS256 signature, `exp`, `iss=LOS_ISSUER`, `aud=LOS_CUSTOMER_AUDIENCE`, `type==='customer'`, `tokenType==='access'` and a 32-bit `userId`, then upserts and returns a customer session (`CHAT_CUSTOMER_SESSION_EXPIRES_IN`).
-- **Staff:** `POST /agent/api/v1/auth/session { handoffToken }`. `exchangeHandoff` checks the chat-only LOS handoff (`aud=LOS_HANDOFF_AUDIENCE`, `tokenType=LOS_HANDOFF_TOKEN_TYPE`, `type==='staff'`); the token's `role` claim is validated against the `roles` table (`kind=STAFF`) — unknown or customer roles are rejected with 401. Any known LOS staff role is allowed. `role_id` is stored on `chat_users` as a FK. los_web passes the handoff to the iframe by postMessage; the real LOS staff token never leaves los_web.
-- **Sessions:** HS256 with `CHAT_SESSION_SECRET`, `iss=chat-backend`, one audience per kind (`chat-customer` / `chat-staff`), so a customer session is rejected on staff routes and vice versa. Stateless: `verifySession(token, kind)` rebuilds `req.user` from the claims without a database call. Clients exchange again when a session expires.
-- Middleware: `authenticateCustomer`, `authenticateStaff` (from `@modules/auth/index.js`). Read the user with `getAuthUser(req)`: `{ id (ChatUser.id), losUserId, kind: 'customer'|'staff', username }`. The socket handshake accepts a chat session of either kind.
+- **Staff:** `POST /agent/api/v1/auth/session { handoffToken }`. `exchangeHandoff` checks the chat-only LOS handoff (`aud=LOS_HANDOFF_AUDIENCE`, `tokenType=LOS_HANDOFF_TOKEN_TYPE`, `type==='staff'`); the token's `role` claim is validated against the `roles` table (`type=STAFF`) — unknown or customer roles are rejected with 401. Any known LOS staff role is allowed. `role_id` is stored on `chat_users` as a FK. los_web passes the handoff to the iframe by postMessage; the real LOS staff token never leaves los_web.
+- **Sessions:** HS256 with `CHAT_SESSION_SECRET`, `iss=chat-backend`, one audience per type (`chat-customer` / `chat-staff`), so a customer session is rejected on staff routes and vice versa. Stateless: `verifySession(token, type)` rebuilds `req.user` from the claims without a database call.
+- **Refresh tokens** (`refresh_tokens`, both types): `/auth/session` also returns an opaque `refreshToken` (only its SHA-256 is stored) and `refreshExpiresAt`. `POST /auth/refresh { refreshToken }` rotates it (old one revoked, new one in the same `family_id`, same absolute `expires_at`, `CHAT_REFRESH_EXPIRES_IN` = 24h) and returns a new access token; reusing a revoked token revokes the whole family. `POST /auth/logout { refreshToken }` revokes the family (idempotent). A refresh token only works on its own audience's endpoint. Refresh does not consult LOS. Expired rows are deleted on the user's next login.
+- Middleware: `authenticateCustomer`, `authenticateStaff` (from `@modules/auth/index.js`). Read the user with `getAuthUser(req)`: `{ id (ChatUser.id), losUserId, type: 'customer'|'staff', username }`. The socket handshake accepts a chat session of either type. `chat_users.type` copies `roles.type` (kept for the unique key, because LOS customers and staff are separate ID spaces) and the FK `(role_id, type) → roles(id, type)` stops them disagreeing. Messages have no sender type column: read `sender.type`.
 - LOS facts: tokens are RS256; access tokens carry no `kid`; JWKS is `https://api.los.delightech.asia/api/v1/guest/.well-known/jwks.json`; LOS ids are MySQL `INT`. The LOS team still has to add `POST /admin/chat/handoff-token` (`aud:'chat'`).
-- Not done yet: LOS revocation checks (LOS Redis). A revoked LOS token works until it expires.
+- Not done yet: LOS revocation checks (LOS Redis). A revoked LOS token works until it expires, and a refresh token until its 24h limit.
 - **Current development mode: real LOS dev** (`LOS_JWKS_URI` = the LOS dev JWKS, key `kid 68abf7cb51cb96d1`). Until LOS issues `aud:'chat'`, dev borrows the analytics-dashboard handoff (`LOS_HANDOFF_AUDIENCE=analytics-dashboard`, `LOS_HANDOFF_TOKEN_TYPE=dashboard-handoff`); `env.ts` refuses that in production. Manual tests: `postman/chat_backend_los_dev.postman_collection.json` (real logins; the only Postman collection). Customer folder: 1. LOS login → 2. Chat session; Staff folder: 1. LOS login → 2. LOS handoff → 3. Chat session, run by hand (the user wants to see the flow). Each step saves its token on success and clears it and later ones on failure; chat requests inherit `Bearer {{customerToken}}` / `{{staffToken}}` from their folder. The generator lives outside the repo, so edit the JSON directly if needed. `smoke:socket` needs `LOS_PUBLIC_KEY_PATH` instead.
 
 ## Chat rules
@@ -121,7 +126,7 @@ const staffChatController = new StaffChatController(new StaffChatService(convers
 - Log with the Pino `logger`, never `console.log`.
 - Comments only where they explain *why*, using the `// * ` style already in the code.
 - Prisma Client is generated into `generated/prisma` (git-ignored); import it via `@config/database.js`.
-- Schema changes: edit `prisma/schema.prisma` (snake_case columns via `@map` / `@@map`, UUID ids) → migration → `generate`. Never edit an applied migration.
+- Schema changes: edit `prisma/schema.prisma` (snake_case columns via `@map` / `@@map`, UUID ids), no Postgres enums (a `text` column + a CHECK constraint in the migration, with the allowed values in `src/shared/types/chat-types.ts`) → migration → `generate`. Never edit an applied migration.
 
 ## Constraints
 

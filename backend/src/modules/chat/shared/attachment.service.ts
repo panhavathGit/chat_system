@@ -4,6 +4,7 @@ import type { DbClient } from '@config/database.js';
 import { BadRequestError, NotFoundError, UnsupportedMediaTypeError } from '@shared/errors/AppError.js';
 import { mediaCategoryOf } from '@shared/storage/media-types.js';
 import type { StorageDriver } from '@shared/storage/storage.driver.js';
+import type { MessageType } from '@shared/types/chat-types.js';
 import type { AttachmentRepository } from './attachment.repository.js';
 
 const safeExtension = (fileName: string) => {
@@ -44,7 +45,7 @@ export class AttachmentService {
   }
 
   // * Called inside the send transaction: the file must be the sender's own, unsent, and match the message type
-  async assertSendable(senderId: string, attachmentId: string, type: 'VOICE' | 'IMAGE' | 'FILE', tx: DbClient) {
+  async assertSendable(senderId: string, attachmentId: string, type: Exclude<MessageType, 'TEXT'>, tx: DbClient) {
     const attachment = await this.attachmentRepository.findForAccess(attachmentId, tx);
     if (!attachment || attachment.uploaderId !== senderId) throw new BadRequestError('Unknown attachmentId');
     if (attachment.message) throw new BadRequestError('This attachment was already sent');
@@ -75,6 +76,6 @@ export class AttachmentService {
     if (attachment.uploaderId === user.id) return true;
     if (!attachment.message) return false;
     // * Staff may read every conversation; a customer only their own
-    return user.kind === 'staff' || attachment.message.conversation.customerId === user.id;
+    return user.type === 'staff' || attachment.message.conversation.customerId === user.id;
   }
 }

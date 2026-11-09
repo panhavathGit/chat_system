@@ -1,0 +1,650 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "chat_backend",
+    "version": "1.0.0",
+    "description": "Chat service for the LOS system. Integration guide: docs/backend/features/auth/los-chat-handoff.md. Errors always use the ErrorResponse envelope."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth (customer)",
+      "description": "Flutter app: `/customer/api/v1/auth`"
+    },
+    {
+      "name": "Auth (staff)",
+      "description": "chat_web inside los_web: `/agent/api/v1/auth`"
+    }
+  ],
+  "paths": {
+    "/customer/api/v1/auth/session": {
+      "post": {
+        "tags": [
+          "Auth (customer)"
+        ],
+        "summary": "Exchange an LOS customer access token for a chat session",
+        "security": [],
+        "description": "Accepts the LOS access token the app already holds (`aud=luyleun`, `type=customer`, `tokenType=access`). Finds or creates the chat user and returns a 1 h chat session plus a 24 h refresh token.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Chat session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is missing the token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid, expired or wrong-audience LOS token, or unknown role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customer/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "Auth (customer)"
+        ],
+        "summary": "Swap a refresh token for a new session and a new refresh token",
+        "security": [],
+        "description": "Rotation: the refresh token sent stops working. Sending an already-used token ends the whole login (theft detection), so send one refresh at a time. A refresh token only works on its own audience's endpoint.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is missing refreshToken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown, expired, revoked or already-used refresh token: sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customer/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth (customer)"
+        ],
+        "summary": "End the login behind a refresh token",
+        "security": [],
+        "description": "Revokes every refresh token of that login. Always succeeds, even for an unknown token.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is missing refreshToken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customer/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "Auth (customer)"
+        ],
+        "summary": "The signed-in chat user",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SessionUser"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or wrong-audience access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/api/v1/auth/session": {
+      "post": {
+        "tags": [
+          "Auth (staff)"
+        ],
+        "summary": "Exchange an LOS staff handoff token for a chat session",
+        "security": [],
+        "description": "Accepts the 2-minute handoff token los_web gets from los_backend (`aud=chat`, `type=staff`, `tokenType=chat-handoff`). The `role` claim must be a known staff role. Returns a 15 min chat session plus a 24 h refresh token.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StaffSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Chat session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is missing the token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid, expired or wrong-audience LOS token, or unknown role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "Auth (staff)"
+        ],
+        "summary": "Swap a refresh token for a new session and a new refresh token",
+        "security": [],
+        "description": "Rotation: the refresh token sent stops working. Sending an already-used token ends the whole login (theft detection), so send one refresh at a time. A refresh token only works on its own audience's endpoint.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "New session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is missing refreshToken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown, expired, revoked or already-used refresh token: sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth (staff)"
+        ],
+        "summary": "End the login behind a refresh token",
+        "security": [],
+        "description": "Revokes every refresh token of that login. Always succeeds, even for an unknown token.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Logged out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Body is missing refreshToken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "Auth (staff)"
+        ],
+        "summary": "The signed-in chat user",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "success"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SessionUser"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or wrong-audience access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CustomerSessionRequest": {
+        "type": "object",
+        "properties": {
+          "losToken": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "losToken"
+        ]
+      },
+      "RefreshTokenRequest": {
+        "type": "object",
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "refreshToken"
+        ]
+      },
+      "StaffSessionRequest": {
+        "type": "object",
+        "properties": {
+          "handoffToken": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "handoffToken"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "description": "Chat session JWT. Send as `Authorization: Bearer …` and Socket.io `auth.token`."
+          },
+          "expiresIn": {
+            "type": "string",
+            "description": "Access token lifetime: customer `1h`, staff `15m`",
+            "example": "15m"
+          },
+          "user": {
+            "$ref": "#/components/schemas/SessionUser"
+          },
+          "refreshToken": {
+            "type": "string",
+            "description": "Opaque and single-use. Replace the stored value after every refresh."
+          },
+          "refreshExpiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+            "description": "Absolute end of this login (24 h after sign-in); refreshing does not move it"
+          }
+        },
+        "required": [
+          "accessToken",
+          "expiresIn",
+          "user",
+          "refreshToken",
+          "refreshExpiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "SessionUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "Chat user id (shown as sender.id, customerId, …). Not the LOS id."
+          },
+          "losUserId": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "The LOS userId",
+            "example": 2
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "customer",
+              "staff"
+            ],
+            "description": "Lowercase here; message sender.type is uppercase"
+          },
+          "username": {
+            "type": "string",
+            "example": "admin"
+          }
+        },
+        "required": [
+          "id",
+          "losUserId",
+          "type",
+          "username"
+        ],
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "error"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "example": "UNAUTHORIZED"
+              },
+              "message": {
+                "type": "string",
+                "example": "Invalid or missing access token"
+              },
+              "details": {
+                "description": "Validation errors (field → messages), or the failed token check outside production"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "status",
+          "error"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Chat session `accessToken` from /auth/session or /auth/refresh (never an LOS token)"
+      }
+    }
+  }
+}

@@ -6,7 +6,7 @@ export class RoleRepository {
   findByName(name: string) {
     return this.db.role.findUnique({
       where: { name },
-      select: { id: true, kind: true },
+      select: { id: true, type: true },
     });
   }
 }

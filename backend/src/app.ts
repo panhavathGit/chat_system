@@ -34,5 +34,11 @@ app.get('/health', (_req, res) => {
 app.use('/customer/api/v1', customerV1Router);
 app.use('/agent/api/v1', agentV1Router);
 
+// * API docs (Swagger UI + /docs/openapi.json) outside production only; the tooling is a dev dependency
+if (env.NODE_ENV !== 'production') {
+  const { docsRouter } = await import('./docs/docs.routes.js');
+  app.use('/docs', docsRouter);
+}
+
 app.use(notFoundHandler);
 app.use(errorHandler);

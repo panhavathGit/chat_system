@@ -52,7 +52,7 @@ A sign-in screen with LOS staff **username** and **password**, then three calls 
 3. POST {CHAT_API}/agent/api/v1/auth/session
      body { "handoffToken": "<handoff token>" }
      → 201 { "data": { "accessToken": "<chat session>", "expiresIn": "15m",
-                        "user": { "id", "losUserId", "kind": "staff", "username" } } }
+                        "user": { "id", "losUserId", "type": "staff", "username" } } }
 ```
 
 - Run 2 and 3 back to back; the handoff is valid for 2 minutes and is used once.
@@ -84,7 +84,7 @@ Base: `{CHAT_API}/agent/api/v1`. Every route except `/auth/session` needs `Autho
 | Method | Path | Use |
 | :--- | :--- | :--- |
 | POST | `/auth/session` | handoff → chat session (section 3) |
-| GET | `/auth/me` | `{ id, losUserId, kind: 'staff', username }` |
+| GET | `/auth/me` | `{ id, losUserId, type: 'staff', username }` |
 | GET | `/chat/conversations?page=1&size=20` | Inbox: every conversation with at least one message, latest activity first |
 | GET | `/chat/conversations/:id` | One conversation (same row shape as the inbox) |
 | GET | `/chat/conversations/:id/messages?size=30&before=<messageId>` | History, **newest first**, cursor paging |
@@ -110,12 +110,11 @@ Base: `{CHAT_API}/agent/api/v1`. Every route except `/auth/session` needs `Autho
 {
   "id": "45a7ccac-2684-40e4-a7cf-2fc8ae7d7a62",
   "conversationId": "70e766d1-…",
-  "senderKind": "STAFF",                 // CUSTOMER | STAFF
   "type": "TEXT",                        // TEXT | VOICE | IMAGE | FILE
   "text": "Received your payslip.",      // null allowed for files; caption otherwise
   "clientMessageId": "aa192eeb-3916-46b8-944a-8a4916804961",
   "createdAt": "2026-11-06T06:16:33.960Z",
-  "sender": { "id": "a034f921-…", "username": "admin", "kind": "STAFF" },
+  "sender": { "id": "a034f921-…", "username": "admin", "type": "STAFF" },
   "attachment": null                     // or { "id", "mimeType", "sizeBytes", "fileName", "durationSec" }
 }
 // meta for history: { "size": 30, "nextCursor": "<message id>" | null }   (null = no older messages)
@@ -143,7 +142,7 @@ chat_backend uses **Socket.io**; the current `WsClient` speaks plain WebSocket J
 import { io } from 'socket.io-client';
 const socket = io(CHAT_API, { auth: { token: session.accessToken } }); // same origin as REST, no path change
 socket.on('message:new', (message) => { /* Message shape above */ });
-socket.on('typing', ({ conversationId, user, isTyping }) => { /* user: { id, username, kind } */ });
+socket.on('typing', ({ conversationId, user, isTyping }) => { /* user: { id, username, type: "customer" | "staff" } */ });
 socket.emit('typing', { conversationId, isTyping: true });               // staff → customer
 ```
 
@@ -190,7 +189,7 @@ application   ← placeholder; the applications panel is hidden in step 1
 // chat_backend Message → ChatMessageDto (extend it with attachment + senderName)
 id             ← message.id   (optimistic messages use clientMessageId until the 201 arrives)
 conversationId ← message.conversationId
-side           ← senderKind === "CUSTOMER" ? "customer" : "agent"
+side           ← sender.type === "CUSTOMER" ? "customer" : "agent"
 text           ← message.text ?? ""
 createdAt      ← message.createdAt
 status         ← "sent"
